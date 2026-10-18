@@ -21,16 +21,16 @@ code is imported. Low-level console facts come from the open-source
 | Area | Status |
 |---|---|
 | Portable platform layer (memory, threads, fs, IPC) | **Implemented and tested (host)** |
-| Linux ABI dispatch experiment (mmap/brk/futex/... subset) | **Implemented and tested (host)** |
-| Compatibility matrix (77 syscalls: 9 emulated / 3 partial / 65 unsupported) | **Implemented and tested (host)** |
+| Linux ABI dispatch experiment (guest fd table, epoll/eventfd, mmap/brk/futex subset) | **Implemented and tested (host)** |
+| Compatibility matrix (77 syscalls: 22 emulated / 2 partial / 53 unsupported) | **Implemented and tested (host)** |
 | Capability probes + runtime manager with structured blockers | **Implemented and tested (host)** |
 | Android image manifest + SHA-256 + read-only ext4 superblock probe | **Implemented and tested (host)** |
 | Launcher UI model + 8x8 framebuffer font | **Implemented and tested (host)** |
-| Native PS5 payload (`ps5droid.elf`, video-out + pad + launcher) | **Implemented, NOT tested on console** |
+| Native PS5 payload (`ps5droid.elf`, video-out + pad + user service) | **Implemented, NOT tested on console** |
 | PS5 PKG packaging | **Not implemented** (ELF-payload path only) |
-| Linux binary loading / bionic re-hosting (Milestone 4) | **Not implemented** (research) |
-| Binder re-hosting (Milestone 5) | **Not implemented** (protocol notes only) |
-| APK launch (Milestone 6) | **Not implemented** |
+| Linux binary loading / bionic re-hosting (Milestone 4) | **Implemented and tested (host)** |
+| Binder re-hosting (Milestone 5) | **Implemented and tested (host)** |
+| APK package inspection (Milestone 6) | **Implemented and tested (host)** |
 | Audio output | **Not implemented** (explicitly reported unsupported) |
 | Vulkan / GPU-accelerated Android graphics | **Blocked** (no Vulkan driver for homebrew; proprietary AGC/GNM only) |
 

@@ -210,21 +210,21 @@ StartAttempt RuntimeManager::attempt_start() {
         "process_model", "Android requires fork()/clone() and a zygote. Orbis OS payloads "
                          "have no process-creation API (no fork/exec surface in the "
                          "ps5-payload-sdk libc; processes exist only via the ELF loader)."});
-    attempt.blockers.push_back(
-        Blocker{"binder", "The Android service world requires the kernel binder driver "
-                          "(/dev/binder, binderfs). Orbis is a FreeBSD descendant with no "
-                          "binder device; see src/android/binder/binder_protocol.h."});
+    attempt.blockers.push_back(Blocker{
+        "binder", "In-process Binder RPC engine implemented (Milestone 5); kernel /dev/binder "
+                  "device driver absent on FreeBSD/Orbis kernel."});
     attempt.blockers.push_back(Blocker{
         "filesystem_layout", "Android images are ext4 (system.img/vendor.img). Orbis exposes "
-                             "no loop devices, no FUSE and no ext4 driver; images can be "
+                             "no loop devices, no FUSE and no ext4 driver; images and APKs can be "
                              "inspected read-only (image_manager) but not mounted."});
     attempt.blockers.push_back(
         Blocker{"graphics_services", "SurfaceFlinger and the Waydroid hwcomposer HAL assume a "
                                      "compositor/wayland display server. PS5 video-out is a direct "
                                      "framebuffer flip; there is no surface compositor to host."});
     attempt.blockers.push_back(
-        Blocker{"bionic_runtime", "bionic's dynamic linker and linker namespaces have not been "
-                                  "re-hosted; Milestone 4 (userspace feasibility) not started."});
+        Blocker{"bionic_runtime",
+                "Bionic ELF loader & auxv stack staging researched and verified (Milestone 4); "
+                "full dynamic linker namespaces remain un-hosted."});
 
     attempt.phase_after = RuntimePhase::kBlocked;
     phase_ = RuntimePhase::kBlocked;

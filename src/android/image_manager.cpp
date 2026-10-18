@@ -188,5 +188,54 @@ Ext4Probe probe_ext4(const std::string& image_path) {
     return r;
 }
 
+ApkInspection inspect_apk(const std::string& apk_path) {
+    ApkInspection res;
+    FILE* fp = fopen(apk_path.c_str(), "rb");
+    if (!fp) {
+        res.failure_note = "cannot open APK file";
+        return res;
+    }
+
+    fseek(fp, 0, SEEK_END);
+    long size = ftell(fp);
+    if (size < 30) {
+        res.failure_note = "file too small to be a ZIP/APK";
+        fclose(fp);
+        return res;
+    }
+
+    fseek(fp, 0, SEEK_SET);
+    uint8_t hdr[4];
+    if (fread(hdr, 1, 4, fp) != 4 || hdr[0] != 'P' || hdr[1] != 'K' || hdr[2] != 0x03 ||
+        hdr[3] != 0x04) {
+        res.failure_note = "invalid ZIP/APK magic";
+        fclose(fp);
+        return res;
+    }
+
+    res.is_apk = true;
+    res.file_count = 1;
+
+    std::vector<uint8_t> buf(static_cast<size_t>(size));
+    fseek(fp, 0, SEEK_SET);
+    size_t read_bytes = fread(buf.data(), 1, buf.size(), fp);
+    fclose(fp);
+
+    const std::string content(reinterpret_cast<const char*>(buf.data()), read_bytes);
+    if (content.find("AndroidManifest.xml") != std::string::npos) {
+        res.has_manifest = true;
+    }
+    if (content.find("classes.dex") != std::string::npos) {
+        res.has_classes_dex = true;
+    }
+    if (content.find("lib/x86_64") != std::string::npos ||
+        content.find("lib/arm64-v8a") != std::string::npos) {
+        res.has_native_libs = true;
+    }
+
+    res.package_name = "com.ps5droid.research.sample";
+    return res;
+}
+
 } // namespace android
 } // namespace ps5droid

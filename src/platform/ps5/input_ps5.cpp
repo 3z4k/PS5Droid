@@ -17,7 +17,16 @@ class Ps5Input : public InputBackend {
             return true;
         if (ps5::scePadInit() != 0)
             return false;
-        handle_ = ps5::scePadOpen(ps5::kUserIdSystem, ps5::kPadPortTypeStandard, 0, nullptr);
+        int user_id = ps5::kUserIdSystem;
+        int initial_user = -1;
+        if (ps5::sceUserServiceGetInitialUser(&initial_user) == 0 && initial_user >= 0) {
+            user_id = initial_user;
+        }
+
+        handle_ = ps5::scePadOpen(user_id, ps5::kPadPortTypeStandard, 0, nullptr);
+        if (handle_ < 0 && user_id != ps5::kUserIdSystem) {
+            handle_ = ps5::scePadOpen(ps5::kUserIdSystem, ps5::kPadPortTypeStandard, 0, nullptr);
+        }
         if (handle_ < 0) {
             handle_ = -1;
             return false;

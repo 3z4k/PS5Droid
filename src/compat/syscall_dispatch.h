@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 
+#include "compat/fd_table.h"
 #include "compat/linux_abi.h"
 #include "compat/memory_compat.h"
 
@@ -33,7 +34,7 @@ struct DispatchResult {
 
 class SyscallDispatch {
   public:
-    explicit SyscallDispatch(CompatMemory* memory);
+    explicit SyscallDispatch(CompatMemory* memory, CompatFdTable* fd_table = nullptr);
     ~SyscallDispatch() = default;
     SyscallDispatch(const SyscallDispatch&) = delete;
     SyscallDispatch& operator=(const SyscallDispatch&) = delete;
@@ -52,6 +53,7 @@ class SyscallDispatch {
     uint64_t context_id() const { return context_id_; }
     bool stop_requested() const { return stop_requested_; }
     CompatMemory* memory() { return memory_; }
+    CompatFdTable* fd_table() { return fd_table_; }
 
   private:
     DispatchResult ok(int64_t ret, const char* note);
@@ -59,6 +61,8 @@ class SyscallDispatch {
     DispatchResult nosys(const char* note);
 
     CompatMemory* memory_;
+    CompatFdTable* fd_table_;
+    CompatFdTable default_fd_table_;
     uint64_t context_id_;
     bool stop_requested_ = false;
 };
