@@ -25,8 +25,11 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <sys/event.h>
+
+// clang-format off
 #include <sys/types.h>
+#include <sys/event.h>
+// clang-format on
 
 #if defined(PS5DROID_PLATFORM_PS5)
 
