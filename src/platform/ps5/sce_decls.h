@@ -26,11 +26,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <sys/event.h>
+#include <sys/types.h>
 
 #if defined(PS5DROID_PLATFORM_PS5)
 
 namespace ps5droid {
 namespace ps5 {
+
+extern "C" {
 
 // --- Kernel ----------------------------------------------------------------
 
@@ -161,6 +164,8 @@ int scePadInit(void);
 int scePadOpen(int user_id, int type, int index, void* param);
 int scePadReadState(int handle, ScePadData* data);
 int scePadClose(int handle);
+
+} // extern "C"
 
 } // namespace ps5
 } // namespace ps5droid

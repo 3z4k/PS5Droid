@@ -5,11 +5,6 @@ on:
     branches: ["*"]
   pull_request:
   workflow_dispatch:
-    inputs:
-      build_ps5:
-        description: "Cross-build the native PS5 payload (requires the open-source ps5-payload-sdk; produces an ELF, never a PKG)"
-        type: boolean
-        default: false
 
 jobs:
   lint:
@@ -88,9 +83,8 @@ jobs:
             start.log
 
   ps5:
-    name: PS5 payload cross-build (gated, ELF only)
+    name: PS5 payload cross-build (ELF only)
     runs-on: ubuntu-24.04
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_ps5 }}
 
     steps:
       - uses: actions/checkout@v4
@@ -98,7 +92,7 @@ jobs:
       - name: Install cross toolchain prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-18 lld-18 cmake ninja-build wget unzip
+          sudo apt-get install -y clang-18 lld-18 llvm-18-dev cmake ninja-build wget unzip
 
       - name: Install ps5-payload-sdk (open-source release)
         run: |
@@ -111,7 +105,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          test -f "$PS5_PAYLOAD_SDK/host/toolchain/prospero.cmake" || {
+          test -f "$PS5_PAYLOAD_SDK/toolchain/prospero.cmake" || {
             echo "::error::PS5 toolchain file not found"
             find "$PS5_PAYLOAD_SDK" -maxdepth 5 -type f \
               -name '*.cmake' -print
@@ -119,7 +113,7 @@ jobs:
           }
 
           cmake -S . -B build-ps5 -G Ninja \
-            -DCMAKE_TOOLCHAIN_FILE="$PS5_PAYLOAD_SDK/host/toolchain/prospero.cmake" \
+            -DCMAKE_TOOLCHAIN_FILE="$PS5_PAYLOAD_SDK/toolchain/prospero.cmake" \
             -DPS5DROID_BUILD_PS5=ON \
             2>&1 | tee configure-ps5.log
 

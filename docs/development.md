@@ -42,7 +42,7 @@ zip or `make install`), then:
 export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
 cmake -B build-ps5 \
   -G Ninja \
-  -DCMAKE_TOOLCHAIN_FILE=$PS5_PAYLOAD_SDK/host/toolchain/prospero.cmake \
+  -DCMAKE_TOOLCHAIN_FILE=$PS5_PAYLOAD_SDK/toolchain/prospero.cmake \
   -DPS5DROID_BUILD_PS5=ON
 cmake --build build-ps5 --target ps5droid
 # produces build-ps5/ps5droid.elf  (an ELF payload, NOT a PKG)
@@ -85,10 +85,9 @@ console results as new evidence when you get them, and record them in
    no stale build dirs).
 2. **host** — gcc and clang builds, unit tests via CTest, logs uploaded
    as artifacts.
-3. **ps5 (gated)** — only on `workflow_dispatch` with `build_ps5=true`;
-   installs the official ps5-payload-sdk release, cross-builds
-   `ps5droid.elf`, and uploads it with an explicit "ELF payload, not a
-   PKG" note. It never runs by default and never signs packages.
+3. **ps5** — runs on every push and PR; installs the official ps5-payload-sdk release,
+   cross-builds `ps5droid.elf`, and uploads it with an explicit "ELF payload, not a
+   PKG" note. It never signs packages.
 
 ## 6. Honesty policy (project rules)
 
