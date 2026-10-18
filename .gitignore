@@ -1,0 +1,10 @@
+build/
+build-*/
+*.o
+*.a
+*.so
+*.elf
+*.self
+*.pkg
+.cache/
+compile_commands.json

@@ -1,0 +1,73 @@
+// PS5Droid - Linux ABI table + FreeBSD mapping consistency tests.
+#include "test_framework.h"
+
+#include <cstring>
+#include <set>
+
+#include "compat/linux_abi.h"
+
+using namespace ps5droid::linux_abi;
+
+PS5DROID_TEST(table_entries_valid) {
+    std::set<int> seen;
+    for (int i = 0; i < kSyscallTableSize; ++i) {
+        const SyscallInfo& e = kSyscallTable[i];
+        CHECK_MSG(e.name != nullptr, "entry without name");
+        CHECK_MSG(e.note != nullptr && e.note[0] != '\0', "entry without note");
+        CHECK_MSG(seen.insert(e.number).second, "duplicate syscall number");
+    }
+    CHECK_MSG(kSyscallTableSize >= 70, "table suspiciously small");
+}
+
+PS5DROID_TEST(names_resolve) {
+    CHECK_MSG(strcmp(syscall_name(kMmap), "mmap") == 0, "mmap name");
+    CHECK_MSG(strcmp(syscall_name(kFutex), "futex") == 0, "futex name");
+    CHECK_MSG(strcmp(syscall_name(kGetdents64), "getdents64") == 0, "getdents64 name");
+    CHECK_MSG(syscall_name(9999) == nullptr, "unknown must be null");
+    CHECK_MSG(syscall_name(kOpen) != nullptr, "open must be tracked");
+}
+
+PS5DROID_TEST(freebsd_numbers_match_sdk_sources) {
+    // These values were read from ps5-payload-sdk crt/syscall.h; if the
+    // SDK changes, this test is where the mismatch will surface.
+    struct Expected {
+        int linux_nr;
+        int freebsd_nr;
+    };
+    const Expected expected[] = {
+        {kRead, 3},    {kWrite, 4},   {kOpen, 5},      {kClose, 6},  {kGetpid, 20},
+        {kAccess, 33}, {kMunmap, 73}, {kMprotect, 74}, {kMmap, 477}, {kLseek, 478},
+    };
+    for (const auto& e : expected) {
+        const FreebsdMapping* m = freebsd_mapping(e.linux_nr);
+        CHECK_MSG(m != nullptr, "mapping missing");
+        CHECK_MSG(m->freebsd_nr == e.freebsd_nr, "wrong FreeBSD number");
+    }
+    // Unverified numbers must NOT be mapped (no guessing).
+    CHECK_MSG(freebsd_mapping(kFutex) == nullptr, "futex unverified");
+    CHECK_MSG(freebsd_mapping(kClone) == nullptr, "clone unverified");
+    CHECK_MSG(freebsd_mapping(kExecve) == nullptr, "execve unverified");
+    CHECK_MSG(freebsd_mapping(9999) == nullptr, "unknown unmapped");
+}
+
+PS5DROID_TEST(linux_numbers_are_x86_64_facts) {
+    // Anchor checks for the Linux x86_64 UAPI numbers this project's whole
+    // premise rests on (read=0/write=1 vs FreeBSD read=3/write=4 proves
+    // the ABI divergence).
+    CHECK(kRead == 0);
+    CHECK(kWrite == 1);
+    CHECK(kMmap == 9);
+    CHECK(kMprotect == 10);
+    CHECK(kMunmap == 11);
+    CHECK(kBrk == 12);
+    CHECK(kClone == 56);
+    CHECK(kExecve == 59);
+    CHECK(kFutex == 202);
+    CHECK(kGettid == 186);
+    CHECK(kClockGettime == 228);
+    CHECK(kExitGroup == 231);
+    CHECK(kOpenat == 257);
+    // The divergence itself:
+    CHECK(kRead != freebsd_mapping(kRead)->freebsd_nr);
+    CHECK(kMmap != freebsd_mapping(kMmap)->freebsd_nr);
+}
