@@ -38,7 +38,17 @@ class Ps5Display : public DisplayBackend {
     ~Ps5Display() override { shutdown(); }
 
     bool init(uint32_t* w, uint32_t* h) override {
-        handle_ = ps5::sceVideoOutOpen(ps5::kUserIdSystem, 0, 0, nullptr);
+        int user_id = ps5::kUserIdSystem;
+        int initial_user = -1;
+        if (ps5::sceUserServiceGetInitialUser(&initial_user) == 0 && initial_user >= 0) {
+            user_id = initial_user;
+        }
+
+        handle_ = ps5::sceVideoOutOpen(user_id, 0, 0, nullptr);
+        if (handle_ < 0 && user_id != ps5::kUserIdSystem) {
+            // Fallback to system user if initial user failed
+            handle_ = ps5::sceVideoOutOpen(ps5::kUserIdSystem, 0, 0, nullptr);
+        }
         if (handle_ < 0)
             return false;
 

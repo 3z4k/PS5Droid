@@ -67,5 +67,18 @@ struct Ext4Probe {
 
 Ext4Probe probe_ext4(const std::string& image_path);
 
+// Milestone 6: APK archive and AndroidManifest structure inspection.
+struct ApkInspection {
+    bool is_apk = false;
+    bool has_manifest = false;
+    bool has_classes_dex = false;
+    bool has_native_libs = false;
+    std::string package_name;
+    size_t file_count = 0;
+    std::string failure_note;
+};
+
+ApkInspection inspect_apk(const std::string& apk_path);
+
 } // namespace android
 } // namespace ps5droid

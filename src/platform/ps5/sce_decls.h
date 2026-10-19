@@ -65,6 +65,10 @@ typedef struct SceNotificationRequest {
 } SceNotificationRequest;
 int sceKernelSendNotificationRequest(int unk, SceNotificationRequest* req, size_t size, int unk2);
 
+// --- User Service ----------------------------------------------------------
+
+int sceUserServiceGetInitialUser(int* user_id);
+
 // --- Video out ---------------------------------------------------------------
 
 // The buffer attribute is kept opaque exactly like the SDL port does; the

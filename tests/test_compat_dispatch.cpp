@@ -178,8 +178,7 @@ PS5DROID_TEST(write_passthrough) {
 PS5DROID_TEST(honest_enosys_for_blockers) {
     CompatMemory mem;
     SyscallDispatch d(&mem);
-    const int blocked[] = {kOpen,  kClone,  kFork, kExecve,    kSocket, kUname,
-                           kPrctl, kGetuid, kRead, kEpollWait, kOpenat, kPrctl};
+    const int blocked[] = {kClone, kFork, kExecve, kSocket, kUname, kPrctl, kGetuid};
     for (int nr : blocked) {
         SyscallArgs a{};
         DispatchResult r = d.invoke(nr, a);
@@ -187,6 +186,74 @@ PS5DROID_TEST(honest_enosys_for_blockers) {
         snprintf(msg, sizeof(msg), "syscall %d must be ENOSYS", nr);
         CHECK_MSG(r.ret == -1 && r.err == kEnosys && !r.supported, msg);
     }
+}
+
+PS5DROID_TEST(fd_table_and_epoll_dispatch) {
+    CompatMemory mem;
+    CompatFdTable fdt;
+    SyscallDispatch d(&mem, &fdt);
+
+    std::string tmp = "ps5droid_fd_test.tmp";
+    SyscallArgs open_args{};
+    open_args.a[0] = reinterpret_cast<uint64_t>(tmp.c_str());
+    open_args.a[1] = 0x200 | 0x400 | 0x2; // O_CREAT|O_TRUNC|O_RDWR
+    DispatchResult r = d.invoke(kOpen, open_args);
+    CHECK_MSG(r.ret >= 3, "open should return valid guest fd");
+    int fd = static_cast<int>(r.ret);
+
+    const char* data = "hello fd_table";
+    SyscallArgs write_args{};
+    write_args.a[0] = fd;
+    write_args.a[1] = reinterpret_cast<uint64_t>(data);
+    write_args.a[2] = strlen(data);
+    r = d.invoke(kWrite, write_args);
+    CHECK_MSG(r.ret == static_cast<int64_t>(strlen(data)), "write to fd failed");
+
+    SyscallArgs seek_args{};
+    seek_args.a[0] = fd;
+    seek_args.a[1] = 0;
+    seek_args.a[2] = 0; // SEEK_SET
+    r = d.invoke(kLseek, seek_args);
+    CHECK_MSG(r.ret == 0, "lseek failed");
+
+    char buf[64] = {0};
+    SyscallArgs read_args{};
+    read_args.a[0] = fd;
+    read_args.a[1] = reinterpret_cast<uint64_t>(buf);
+    read_args.a[2] = sizeof(buf);
+    r = d.invoke(kRead, read_args);
+    CHECK_MSG(r.ret == static_cast<int64_t>(strlen(data)) && strcmp(buf, data) == 0,
+              "read from fd failed");
+
+    SyscallArgs ep_create{};
+    r = d.invoke(kEpollCreate1, ep_create);
+    CHECK_MSG(r.ret >= 3, "epoll_create1 failed");
+    int epfd = static_cast<int>(r.ret);
+
+    EpollEvent ev{1 /* EPOLLIN */, 12345};
+    SyscallArgs ep_ctl{};
+    ep_ctl.a[0] = epfd;
+    ep_ctl.a[1] = 1; // EPOLL_CTL_ADD
+    ep_ctl.a[2] = fd;
+    ep_ctl.a[3] = reinterpret_cast<uint64_t>(&ev);
+    r = d.invoke(kEpollCtl, ep_ctl);
+    CHECK_MSG(r.ret == 0, "epoll_ctl failed");
+
+    EpollEvent out_evs[4];
+    SyscallArgs ep_wait{};
+    ep_wait.a[0] = epfd;
+    ep_wait.a[1] = reinterpret_cast<uint64_t>(out_evs);
+    ep_wait.a[2] = 4;
+    ep_wait.a[3] = 0;
+    r = d.invoke(kEpollWait, ep_wait);
+    CHECK_MSG(r.ret == 1 && out_evs[0].data == 12345, "epoll_wait failed");
+
+    SyscallArgs close_args{};
+    close_args.a[0] = fd;
+    d.invoke(kClose, close_args);
+    close_args.a[0] = epfd;
+    d.invoke(kClose, close_args);
+    ps5droid::platform::remove_file(tmp);
 }
 
 PS5DROID_TEST(exit_group_sets_flag) {

@@ -59,9 +59,12 @@ add_library(ps5droid_core STATIC
     src/compat/memory_compat.cpp
     src/compat/syscall_dispatch.cpp
     src/compat/ipc_compat.cpp
+    src/compat/fd_table.cpp
+    src/compat/bionic_loader.cpp
     src/android/sha256.cpp
     src/android/image_manager.cpp
     src/android/runtime_manager.cpp
+    src/android/binder/binder_engine.cpp
     src/ui/launcher.cpp
     src/ui/bitmap_font.cpp
 )
@@ -99,6 +102,8 @@ if(PS5DROID_BUILD_TESTS AND PS5DROID_BUILD_HOST AND NOT PROSPERO)
         tests/test_image_manager.cpp
         tests/test_runtime_manager.cpp
         tests/test_ui.cpp
+        tests/test_bionic_and_fd.cpp
+        tests/test_binder_and_apk.cpp
     )
     target_include_directories(ps5droid_tests PRIVATE tests src)
     target_link_libraries(ps5droid_tests PRIVATE ps5droid_core)
