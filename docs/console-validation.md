@@ -29,6 +29,7 @@ report is logged; it must not be mistaken for an empty successful report.
 | --- | --- |
 | `schema_version` | Report format version, currently 1 |
 | `backend` | Distinguishes host and console runs |
+| `run_id`, `architecture`, `compiler` | Per-probe process/time identifier and actual build architecture/compiler |
 | `revision` | Configured source revision, with `-dirty` when applicable |
 | `sdk` | Explicit build pin, or `unrecorded` |
 | `firmware`, `loader` | `unrecorded` until supplied by the tester |
@@ -51,8 +52,8 @@ The payload performs no kernel privilege changes or JIT permission workaround.
    Circle and Options; note disconnect/reconnect behavior separately.
 3. Let multiple frames present, then exit through Options.
 4. Retrieve the report with your existing console file-transfer tooling. A report
-   left from a previous process is not evidence for a new run; compare revision
-   and the externally recorded run identifier/time.
+   left from a previous process is not evidence for a new run; compare the embedded
+   `run_id`, revision and externally recorded run identifier/time.
 5. Relaunch at least twice and verify that display and input initialize again.
    Observe available memory/resource diagnostics if your setup provides them.
 6. Preserve logs, screenshots, failed operations and any missing observations.

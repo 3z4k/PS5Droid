@@ -62,6 +62,9 @@ endif()
 # APK manifests use ZIP DEFLATE. Host builds use system zlib; console builds
 # build the same pinned upstream source with the PS5 toolchain.
 if(PROSPERO)
+    if(POLICY CMP0135)
+        cmake_policy(SET CMP0135 NEW)
+    endif()
     include(FetchContent)
     set(ZLIB_BUILD_SHARED OFF CACHE BOOL "" FORCE)
     set(ZLIB_INSTALL OFF CACHE BOOL "" FORCE)

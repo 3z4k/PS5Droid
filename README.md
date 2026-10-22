@@ -85,6 +85,7 @@ The output is `build-ps5/ps5droid.elf`, an ELF payload. Follow the
 
 ## Development and evidence
 
+- [Local validation record](docs/validation.md)
 - [Architecture and milestone boundaries](docs/architecture.md)
 - [Host builds, sanitizers, fuzzing and fixture provenance](docs/development.md)
 - [Linux ABI and PS5 platform constraints](docs/platform-constraints.md)

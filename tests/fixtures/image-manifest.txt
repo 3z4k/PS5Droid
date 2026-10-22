@@ -1,0 +1,4 @@
+system_image = system.img
+vendor_image = vendor.img
+android_api_level = 35
+abi = x86_64

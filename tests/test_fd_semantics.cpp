@@ -203,3 +203,28 @@ PS5DROID_TEST(linux_differential_eventfd_and_epoll) {
     CHECK(gout.events == n.events && gout.data == n.data.u64);
 }
 #endif
+PS5DROID_TEST(openat_accepts_both_register_encodings_of_at_fdcwd) {
+    File file;
+    CompatMemory memory;
+    SyscallDispatch dispatch(&memory);
+    for (uint64_t dirfd : {uint64_t(0xffffffffffffff9cull), uint64_t(0xffffff9cull)}) {
+        SyscallArgs args{};
+        args.a[0] = dirfd;
+        args.a[1] = reinterpret_cast<uint64_t>(file.path.c_str());
+        auto result = dispatch.invoke(ps5droid::linux_abi::kOpenat, args);
+        CHECK(result.ret >= 3);
+        CHECK(dispatch.fd_table()->close(static_cast<int>(result.ret)) == 0);
+    }
+}
+PS5DROID_TEST(futex_rejects_unsupported_timeouts_without_waiting) {
+    CompatMemory memory;
+    SyscallDispatch dispatch(&memory);
+    uint32_t word = 1;
+    SyscallArgs args{};
+    args.a[0] = reinterpret_cast<uint64_t>(&word);
+    args.a[1] = 128;
+    args.a[2] = 1;
+    args.a[3] = 1;
+    auto result = dispatch.invoke(ps5droid::linux_abi::kFutex, args);
+    CHECK(result.ret == -1 && result.err == 22);
+}

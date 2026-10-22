@@ -115,10 +115,7 @@ MapResult CompatMemory::mprotect(uintptr_t address, size_t length, int prot) {
             bool want_w = (prot & linux_abi::kProtWrite) != 0;
             if (platform::protect_memory(reinterpret_cast<void*>(address), length, want_r,
                                          want_w)) {
-                return {reinterpret_cast<void*>(0), 0,
-                        (prot & linux_abi::kProtExec)
-                            ? "R/W applied; PROT_EXEC not granted (no JIT)"
-                            : "protection applied"};
+                return {nullptr, 0, "protection applied"};
             }
             return {nullptr, linux_abi::kEinval, "host mprotect failed"};
         }

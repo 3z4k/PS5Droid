@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 import struct
 import zipfile
+import warnings
 
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('output', type=Path)
@@ -27,7 +28,9 @@ apk('stored.apk', files)
 apk('deflated.apk', files, zipfile.ZIP_DEFLATED)
 apk('plain.zip', [('assets/message.txt', b'AndroidManifest.xml classes.dex')])
 apk('bad-manifest.apk', [('AndroidManifest.xml', b'not binary XML')])
-apk('duplicate.apk', [('AndroidManifest.xml', manifest), ('AndroidManifest.xml', manifest)])
+with warnings.catch_warnings():
+    warnings.simplefilter('ignore', UserWarning)
+    apk('duplicate.apk', [('AndroidManifest.xml', manifest), ('AndroidManifest.xml', manifest)])
 apk('large-manifest.apk', [('AndroidManifest.xml', b'x' * (4 * 1024 * 1024 + 1))], zipfile.ZIP_DEFLATED)
 # CRC corruption: mutate the stored manifest without altering its advertised CRC.
 data = bytearray((a.output / 'stored.apk').read_bytes())
@@ -35,8 +38,6 @@ name_length, extra_length = struct.unpack_from('<HH', data, 26)
 data[30 + name_length + extra_length + 10] ^= 0x10
 (a.output / 'bad-crc.apk').write_bytes(data)
 (a.output / 'truncated.apk').write_bytes((a.output / 'stored.apk').read_bytes()[:-10])
-# A forged program header offset used by the deterministic malformed ELF corpus.
-(a.output / 'stamp').write_text('ZIP fixtures generated\n')
 
 
 def binary_xml(utf8=True):
@@ -87,3 +88,5 @@ while struct.unpack_from('<H', xml, at)[0] != 0x102:
     at += struct.unpack_from('<I', xml, at + 4)[0]
 struct.pack_into('<H', xml, at + 26, 0)
 apk('bad-attributes.apk', [('AndroidManifest.xml', xml)])
+
+(a.output / 'stamp').write_text('ZIP/AXML fixtures generated\n')

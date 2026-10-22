@@ -140,7 +140,7 @@ PS5DROID_TEST(futex_via_dispatch) {
     a.a[1] = kFutexWait | kFutexPrivateFlag;
     a.a[2] = 999;
     DispatchResult r = d.invoke(kFutex, a);
-    CHECK_MSG(r.ret == 1, "expected EWOULDBLOCK");
+    CHECK_MSG(r.ret == -1 && r.err == kEagain, "expected EAGAIN");
 
     // No-waiter wake returns 0
     SyscallArgs b{};

@@ -33,6 +33,7 @@ CapabilityReport RuntimeManager::probe(const std::string& writable_dir) {
     phase_ = RuntimePhase::kProbing;
     CapabilityReport report;
     report.backend = platform::backend_name();
+    report.run_id = std::to_string(getpid()) + "-" + std::to_string(platform::monotonic_ns());
 
     auto add = [&](const char* name, bool passed, const std::string& detail) {
         report.results.push_back(CapabilityResult{name, passed, detail});

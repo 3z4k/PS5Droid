@@ -9,6 +9,7 @@ assert report['backend'] == 'posix', report['backend']
 assert report['android_runtime'] == 'blocked'
 assert report['platform_probes_passed'] and all(p['passed'] for p in report['probes'])
 assert report['firmware'] == report['loader'] == 'unrecorded'
-assert report['revision']
+assert report['revision'] and report['run_id'] != 'unrecorded'
+assert report['architecture'] in {'x86_64', 'arm64'} and report['compiler']
 assert apk['is_apk'] and apk['package_name'] == 'org.ps5droid.inspection'
 assert apk['min_sdk'] == 28 and apk['target_sdk'] == 35

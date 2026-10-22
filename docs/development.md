@@ -35,10 +35,13 @@ ctest --test-dir build-tsan --output-on-failure
 CC=clang CXX=clang++ cmake -S . -B build-fuzz -G Ninja \
   -DPS5DROID_BUILD_FUZZER=ON
 cmake --build build-fuzz --target ps5droid_fuzz
-./build-fuzz/ps5droid_fuzz -runs=10000 -max_len=65536
+mkdir -p build-fuzz/corpus
+python3 tools/build_elf_fixture.py --output build-fuzz/corpus/cooperative.elf
+cp tests/fixtures/image-manifest.txt build-fuzz/corpus/image-manifest.txt
+./build-fuzz/ps5droid_fuzz build-fuzz/corpus -runs=10000 -max_len=65536
 ```
 
-Address/UndefinedBehaviorSanitizer and ThreadSanitizer run separately. The
+Address/UndefinedBehaviorSanitizer and ThreadSanitizer run separately. Seeded fuzzing also requires upstream LLVM Clang and LLD. The
 libFuzzer target instruments ELF header and text image-manifest parsing. APK
 inspection has deterministic malformed-container/AXML regression tests; this
 harness does not claim APK fuzz coverage. Do not execute mutated ELF inputs.

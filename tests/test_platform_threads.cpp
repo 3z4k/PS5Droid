@@ -102,10 +102,8 @@ PS5DROID_TEST(futex_wouldblock_and_wake) {
 }
 
 PS5DROID_TEST(futex_wake_waiter) {
-    // The main thread sleeps inside wait(); the waker thread wakes it after
-    // a generous delay (1s), without racing a write against the wait check. The 1s delay only
-    // bounds the worst case for a heavily preempted CI runner; the waiter enqueues within
-    // microseconds in practice.
+    // Keep attempting wake until the waiter has enqueued; no shared-word race
+    // or scheduler-dependent sleep is needed. CTest bounds a regression hang.
     static uint32_t word;
     word = 7;
 

@@ -32,6 +32,7 @@ struct CapabilityReport {
     std::vector<CapabilityResult> results;
     bool all_passed = false;
     const char* backend = "";
+    std::string run_id;
 };
 
 struct Blocker {

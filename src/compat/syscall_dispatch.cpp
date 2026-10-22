@@ -149,7 +149,7 @@ DispatchResult SyscallDispatch::invoke(int linux_nr, const SyscallArgs& args) {
         int mode = static_cast<int>(linux_nr == kOpenat ? args.a[3] : args.a[2]);
         if (!path)
             return fail(kEfault, "path is null");
-        if (linux_nr == kOpenat && path[0] != '/' && static_cast<int64_t>(args.a[0]) != -100)
+        if (linux_nr == kOpenat && path[0] != '/' && static_cast<int>(args.a[0]) != -100)
             return fail(kEnosys, "openat relative dirfd is not implemented");
         int fd = fd_table_->open_file(path, flags, mode);
         if (fd < 0)
@@ -168,7 +168,7 @@ DispatchResult SyscallDispatch::invoke(int linux_nr, const SyscallArgs& args) {
         int fd = static_cast<int>(static_cast<int64_t>(args.a[0]));
         void* buf = reinterpret_cast<void*>(args.a[1]);
         size_t count = static_cast<size_t>(args.a[2]);
-        if (!buf)
+        if (!buf && count)
             return fail(kEfault, "read buf is null");
         int64_t r = fd_table_->read(fd, buf, count);
         if (r < 0)
@@ -193,7 +193,7 @@ DispatchResult SyscallDispatch::invoke(int linux_nr, const SyscallArgs& args) {
         int fd = static_cast<int>(static_cast<int64_t>(args.a[0]));
         const void* buf = reinterpret_cast<const void*>(args.a[1]);
         size_t count = static_cast<size_t>(args.a[2]);
-        if (buf == nullptr)
+        if (buf == nullptr && count)
             return fail(kEfault, "write buf is null");
         int64_t n = fd_table_->write(fd, buf, count);
         if (n < 0)
@@ -268,7 +268,7 @@ DispatchResult SyscallDispatch::invoke(int linux_nr, const SyscallArgs& args) {
     }
 
     case kEventfd2: {
-        uint64_t initval = args.a[0];
+        uint64_t initval = static_cast<uint32_t>(args.a[0]);
         int flags = static_cast<int>(args.a[1]);
         int fd = fd_table_->create_eventfd(initval, flags);
         if (fd < 0)
@@ -329,9 +329,13 @@ DispatchResult SyscallDispatch::invoke(int linux_nr, const SyscallArgs& args) {
             return fail(kEfault, "uaddr is null");
         uint32_t base = op & ~kFutexPrivateFlag;
         bool priv = (op & kFutexPrivateFlag) != 0;
+        if (reinterpret_cast<uintptr_t>(uaddr) % alignof(uint32_t))
+            return fail(kEinval, "unaligned futex address");
         if (base == kFutexWait && priv) {
+            if (args.a[3])
+                return fail(kEinval, "futex timeouts are not implemented");
             int r = platform::Futex().wait(uaddr, val);
-            return ok(r, r == 0 ? "woke" : "EWOULDBLOCK");
+            return r == 0 ? ok(0, "woke") : fail(kEagain, "futex value mismatch");
         }
         if (base == kFutexWake && priv) {
             int r = platform::Futex().wake(uaddr, val);

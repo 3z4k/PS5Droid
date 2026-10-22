@@ -21,7 +21,8 @@ const SyscallInfo kSyscallTable[] = {
     {kGettid, "gettid", kEmulated, "maps to the platform thread id"},
     {kClockGettime, "clock_gettime", kEmulated,
      "CLOCK_MONOTONIC / CLOCK_REALTIME from platform clocks"},
-    {kFutex, "futex", kPartial, "FUTEX_WAIT/WAKE with PRIVATE flag only, registry-based"},
+    {kFutex, "futex", kPartial,
+     "private WAIT/WAKE only; timeouts rejected; mismatch returns EAGAIN"},
     {kExitGroup, "exit_group", kEmulated, "flags the emulation context as stopping"},
 
     // --- guest fd table & stream / file operations ------------------------

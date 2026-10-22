@@ -75,10 +75,15 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build zlib1g-dev
+      - run: sudo apt-get update && sudo apt-get install -y clang lld cmake ninja-build zlib1g-dev
       - run: CC=clang CXX=clang++ cmake -B build -G Ninja -DPS5DROID_BUILD_FUZZER=ON
       - run: cmake --build build --target ps5droid_fuzz
-      - run: ./build/ps5droid_fuzz -runs=10000 -max_len=65536
+      - name: Seeded fuzz smoke
+        run: |
+          mkdir -p build/corpus
+          python3 tools/build_elf_fixture.py --output build/corpus/cooperative.elf
+          cp tests/fixtures/image-manifest.txt build/corpus/image-manifest.txt
+          ./build/ps5droid_fuzz build/corpus -runs=10000 -max_len=65536
   ps5:
     name: PS5 cross-build (hardware execution unverified)
     runs-on: ubuntu-24.04

@@ -3,6 +3,7 @@
 #include "compat/memory_compat.h"
 #include "elf_fixture.h"
 #include "test_framework.h"
+#include <algorithm>
 #include <cstring>
 using namespace ps5droid::compat;
 PS5DROID_TEST(elf_rejects_overflowing_table_and_invalid_layout) {
@@ -80,4 +81,22 @@ PS5DROID_TEST(elf_runner_rejects_invalid_input) {
     const char junk[] = "not an ELF";
     auto result = run_cooperative_elf(junk, sizeof(junk));
     CHECK(!result.executed && !result.note.empty());
+}
+PS5DROID_TEST(elf_runner_rejects_executable_contract_violations) {
+#if defined(__x86_64__)
+    auto bytes = fixture::elf();
+    fixture::put(bytes, 68, 7, 4);
+    CHECK(!run_cooperative_elf(bytes.data(), bytes.size()).executed);
+    bytes = fixture::elf();
+    bytes[130] = 0x0f;
+    bytes[131] = 0x05;
+    auto raw = run_cooperative_elf(bytes.data(), bytes.size());
+    CHECK(!raw.executed && raw.note.find("syscall") != std::string::npos);
+    bytes = fixture::elf();
+    fixture::put(bytes, 56, 2, 2);
+    std::fill(bytes.begin() + 120, bytes.begin() + 176, 0);
+    fixture::put(bytes, 120, 2, 4);
+    auto dynamic = run_cooperative_elf(bytes.data(), bytes.size());
+    CHECK(!dynamic.executed && dynamic.note.find("dynamic") != std::string::npos);
+#endif
 }
