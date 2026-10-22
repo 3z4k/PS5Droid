@@ -1,98 +1,99 @@
-# PS5Droid
+<div align="center">
+
+![PS5Droid: native Android runtime research](docs/assets/banner.svg)
 
 **Native Android runtime research for jailbroken PlayStation 5 consoles.**
 
-PS5Droid is an open-source systems-research project that investigates —
-step by step, with test evidence — what it would take to run Android
-application components directly inside a native PS5 homebrew payload.
-It is *not* a Linux boot, a VM, an emulator image, or a Waydroid port,
-and it does **not** claim to run Android apps today. Every capability
-this repository ships is either tested on the host, implemented against
-verified console APIs but not yet console-executed, or honestly marked
-not implemented / blocked.
+[Build & test](docs/development.md) · [Architecture](docs/architecture.md) · [Console validation](docs/console-validation.md) · [Execution boundary](docs/elf-execution.md)
 
-Waydroid is used as an *architectural reference* only (see
-[`docs/waydroid-analysis.md`](docs/waydroid-analysis.md)); no Waydroid
-code is imported. Low-level console facts come from the open-source
-[ps5-payload-sdk](https://github.com/ps5-payload-dev/sdk) ecosystem.
+</div>
 
-## Current status
+> **Research status:** Android applications do not run yet. The repository contains
+> host-tested components, an explicitly cooperative native ELF execution experiment,
+> and an experimental PS5 payload. A host pass or successful cross-build does not
+> establish console compatibility.
 
-| Area | Status |
-|---|---|
-| Portable platform layer (memory, threads, fs, IPC) | **Implemented and tested (host)** |
-| Linux ABI dispatch experiment (guest fd table, epoll/eventfd, mmap/brk/futex subset) | **Implemented and tested (host)** |
-| Compatibility matrix (77 syscalls: 22 emulated / 2 partial / 53 unsupported) | **Implemented and tested (host)** |
-| Capability probes + runtime manager with structured blockers | **Implemented and tested (host)** |
-| Android image manifest + SHA-256 + read-only ext4 superblock probe | **Implemented and tested (host)** |
-| Launcher UI model + 8x8 framebuffer font | **Implemented and tested (host)** |
-| Native PS5 payload (`ps5droid.elf`, video-out + pad + user service) | **Implemented, NOT tested on console** |
-| PS5 PKG packaging | **Not implemented** (ELF-payload path only) |
-| Linux binary loading / bionic re-hosting (Milestone 4) | **Implemented and tested (host)** |
-| Binder re-hosting (Milestone 5) | **Implemented and tested (host)** |
-| APK package inspection (Milestone 6) | **Implemented and tested (host)** |
-| Audio output | **Not implemented** (explicitly reported unsupported) |
-| Vulkan / GPU-accelerated Android graphics | **Blocked** (no Vulkan driver for homebrew; proprietary AGC/GNM only) |
+## What works, and what that proves
 
-Build status: host build + 40 unit tests green (gcc and clang, ASan/UBSan
-clean). The PS5 target is cross-built in CI only when explicitly
-requested, using the official open-source SDK.
+| Component | Implemented behavior | Evidence boundary |
+| :--- | :--- | :--- |
+| Platform | Memory, threads, filesystem, synchronization and framebuffer primitives | Host tests; console probes available |
+| Linux ABI | Explicit Linux flag/errno translation, shared descriptor lifetimes, positioned reads, bounded memory semantics | Partial compatibility; inspect `--matrix` |
+| Event loops | Blocking/nonblocking eventfd counters and level-triggered eventfd readiness | Other epoll targets and advanced modes fail explicitly |
+| ELF | Bounded ELF64 parsing, address-correct stack staging, RX segment loading and cooperative syscall gateway | Trusted x86-64 fixture only; no unmodified bionic startup |
+| Android package inspection | ZIP directory validation, stored/DEFLATE binary manifests, actual package/SDK/DEX/ABI metadata | Read-only inspection; no installation or signature verification |
+| Binder research | Bounded synchronous in-process RPC with explicit errors and concurrent/reentrant tests | No Android Binder wire protocol or ServiceManager |
+| PS5 payload | Video-out, DualSense input and machine-readable evidence capture | Cross-build evidence only until a hardware run is recorded |
+| Graphics, audio and packaging | CPU framebuffer launcher | Android GPU services, audio output and PKG packaging remain unimplemented |
 
-## Architecture in one page
+This project targets native PS5 homebrew. It does not boot Linux or bundle a VM,
+Android system, Google Play Services, console keys or proprietary Sony SDKs.
+Waydroid is an [architectural reference](docs/waydroid-analysis.md), not an imported runtime.
 
-```
-app/main.cpp (host CLI)          app/ps5_main.cpp (PS5 payload)
-        ui/launcher + ui/bitmap_font
-   android/runtime_manager + android/image_manager (+ sha256)
-        compat/syscall_dispatch (Linux ABI experiment)
-          compat/memory_compat + compat/ipc_compat
-             platform/ (posix backend | ps5 backend)
-```
+## Try the host research harness
 
-* **platform/** — portable memory/thread/fs/display/input primitives;
-  the PS5 backend uses ps5-payload-sdk facilities with hand-maintained,
-  provenance-documented firmware declarations.
-* **compat/** — accepts Linux x86_64 syscall numbers and executes a
-  small, honestly classified subset (anonymous memory, clocks, futex
-  wait/wake, streams); everything else returns `-ENOSYS` with an
-  explanation. The verified Linux→FreeBSD number mapping (e.g. mmap
-  9→477) is data in `src/compat/linux_abi.h`.
-* **android/** — image handling (manifest, SHA-256, ext4 superblock
-  probe; no mounting is possible on Orbis) and the runtime manager whose
-  start attempt always reports structured, reasoned blockers today.
-* **ui/** — pad/keyboard-driven launcher model and a framebuffer font.
-
-Details: [`docs/architecture.md`](docs/architecture.md).
-
-## Host build & test
+Requires CMake ≥ 3.16, a C++17 compiler, zlib development files and Python 3 for tests.
 
 ```sh
-cmake -B build -G Ninja
+cmake -S . -B build
 cmake --build build
 ctest --test-dir build --output-on-failure
-./build/ps5droid-host            # probes + Linux ABI demo
-./build/ps5droid-host --matrix   # full compatibility matrix
+
+./build/ps5droid-host --matrix
+./build/ps5droid-host --inspect-apk tests/fixtures/aapt2-manifest.apk
+./build/ps5droid-host --report-json build/host-evidence.json --probe-exec
+./build/ps5droid-host --start-attempt
 ```
 
-## PS5 build (requires a jailbroken console + ps5-payload-sdk)
+`--start-attempt` deliberately reports blockers. `--inspect-apk` reports the
+manifest's package name and SDK levels; ZIP magic and filename substrings do not
+establish a valid package. The fixture's metadata is independently checkable with
+Android's AAPT2 or APK Analyzer.
+
+### Execute the cooperative ELF fixture
+
+On an x86-64 host with upstream LLVM Clang and LLD:
+
+```sh
+python3 tools/build_elf_fixture.py --output build/fixtures/cooperative.elf
+./build/ps5droid-host --run-cooperative-elf build/fixtures/cooperative.elf
+```
+
+The expected path is **ELF entry → guest `write` → guest `exit_group` → return**.
+The fixture is compiled for LLVM's Android target and explicitly calls a gateway
+in place of raw syscall stubs. It has no bionic or Android framework dependency.
+This is native machine-code execution, not proof that arbitrary Android binaries
+can start. See the [execution contract and remaining blockers](docs/elf-execution.md).
+
+## Build the experimental PS5 payload
+
+Use the open-source [ps5-payload-sdk](https://github.com/ps5-payload-dev/sdk).
+CI pins its release and SHA-256 in [`.github/ps5-sdk.json`](.github/ps5-sdk.json).
 
 ```sh
 export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
-cmake -B build-ps5 -G Ninja \
-  -DCMAKE_TOOLCHAIN_FILE=$PS5_PAYLOAD_SDK/host/toolchain/prospero.cmake \
-  -DPS5DROID_BUILD_PS5=ON
-cmake --build build-ps5 --target ps5droid   # -> build-ps5/ps5droid.elf
+cmake -S . -B build-ps5 \
+  -DCMAKE_TOOLCHAIN_FILE="$PS5_PAYLOAD_SDK/toolchain/prospero.cmake" \
+  -DPS5DROID_BUILD_PS5=ON -DPS5DROID_SDK_VERSION=v0.45
+cmake --build build-ps5 --target ps5droid
 ```
 
-Deploy with `prospero-deploy` over the ELF loader (port 9021). See
-[`docs/development.md`](docs/development.md) for prerequisites and
-console caveats. **`ps5droid.elf` is a payload, not a PKG**, and has not
-been run on a console from this project yet.
+The output is `build-ps5/ps5droid.elf`, an ELF payload. Follow the
+[console validation procedure](docs/console-validation.md) to deploy it, collect
+`/data/ps5droid-evidence.json`, and record firmware/loader and repeat-launch results.
+**No verified console result is included in this repository.**
 
-## Licensing
+## Development and evidence
 
-PS5Droid is MIT-licensed (see [`LICENSE`](LICENSE)). Third-party
-references and their licenses are tracked in
-[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). The project never
-bundles or downloads proprietary Sony SDKs, console keys, Google Play
-Services, Widevine or proprietary codecs.
+- [Architecture and milestone boundaries](docs/architecture.md)
+- [Host builds, sanitizers, fuzzing and fixture provenance](docs/development.md)
+- [Linux ABI and PS5 platform constraints](docs/platform-constraints.md)
+- [Binder/RPC scope and concurrency contract](docs/binder-scope.md)
+- [APK parser limits](docs/apk-inspection.md)
+- [Hardware evidence checklist](docs/console-validation.md)
+
+## License
+
+PS5Droid is MIT-licensed. External references and linked dependencies are listed
+in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). No proprietary platform
+components are downloaded or redistributed by the project.

@@ -50,7 +50,7 @@ class RuntimeManager {
 
     // Runs real, in-process capability probes (memory, threads, futex,
     // filesystem, IPC). Every result reflects an executed test.
-    CapabilityReport probe();
+    CapabilityReport probe(const std::string& writable_dir = ".");
 
     // Performs an honest Android-environment start attempt. On every
     // current platform this returns kBlocked with the concrete reasons.

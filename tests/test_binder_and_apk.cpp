@@ -27,14 +27,13 @@ PS5DROID_TEST(binder_engine_registration_and_tx) {
     CHECK_MSG(out == in, "reply mismatch");
 }
 
-PS5DROID_TEST(apk_inspection_basic) {
-    std::string path = "test_app.apk";
-    const uint8_t zip_hdr[30] = {'P', 'K', 0x03, 0x04, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                                 0,   0,   0,    0,    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+PS5DROID_TEST(apk_rejects_zip_magic_without_directory) {
+    std::string path = "test_invalid_app.apk";
+    const uint8_t zip_hdr[30] = {'P', 'K', 0x03, 0x04};
     ps5droid::platform::write_file(path, zip_hdr, sizeof(zip_hdr));
-
     ApkInspection apk = inspect_apk(path);
-    CHECK_MSG(apk.is_apk, "APK detection failed");
-
     ps5droid::platform::remove_file(path);
+    CHECK(!apk.is_apk);
+    CHECK(apk.package_name.empty());
+    CHECK(!apk.failure_note.empty());
 }

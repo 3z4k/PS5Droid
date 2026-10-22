@@ -196,7 +196,7 @@ PS5DROID_TEST(fd_table_and_epoll_dispatch) {
     std::string tmp = "ps5droid_fd_test.tmp";
     SyscallArgs open_args{};
     open_args.a[0] = reinterpret_cast<uint64_t>(tmp.c_str());
-    open_args.a[1] = 0x200 | 0x400 | 0x2; // O_CREAT|O_TRUNC|O_RDWR
+    open_args.a[1] = 0x40 | 0x200 | 0x2; // O_CREAT|O_TRUNC|O_RDWR
     DispatchResult r = d.invoke(kOpen, open_args);
     CHECK_MSG(r.ret >= 3, "open should return valid guest fd");
     int fd = static_cast<int>(r.ret);
@@ -230,11 +230,13 @@ PS5DROID_TEST(fd_table_and_epoll_dispatch) {
     CHECK_MSG(r.ret >= 3, "epoll_create1 failed");
     int epfd = static_cast<int>(r.ret);
 
+    int eventfd = fdt.create_eventfd(1, 0x800);
+    CHECK(eventfd >= 3);
     EpollEvent ev{1 /* EPOLLIN */, 12345};
     SyscallArgs ep_ctl{};
     ep_ctl.a[0] = epfd;
     ep_ctl.a[1] = 1; // EPOLL_CTL_ADD
-    ep_ctl.a[2] = fd;
+    ep_ctl.a[2] = eventfd;
     ep_ctl.a[3] = reinterpret_cast<uint64_t>(&ev);
     r = d.invoke(kEpollCtl, ep_ctl);
     CHECK_MSG(r.ret == 0, "epoll_ctl failed");
@@ -253,6 +255,7 @@ PS5DROID_TEST(fd_table_and_epoll_dispatch) {
     d.invoke(kClose, close_args);
     close_args.a[0] = epfd;
     d.invoke(kClose, close_args);
+    fdt.close(eventfd);
     ps5droid::platform::remove_file(tmp);
 }
 

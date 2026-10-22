@@ -19,7 +19,73 @@
 #include <vector>
 
 extern "C" {
+#if defined(__APPLE__)
+#include <pthread.h>
+#include <sched.h>
+using thrd_t = pthread_t;
+using mtx_t = pthread_mutex_t;
+using cnd_t = pthread_cond_t;
+constexpr int thrd_success = 0;
+constexpr int mtx_plain = 0;
+struct AppleThreadStart {
+    int (*fn)(void*);
+    void* arg;
+};
+static void* apple_thread_start(void* p) {
+    auto ctx = *static_cast<AppleThreadStart*>(p);
+    delete static_cast<AppleThreadStart*>(p);
+    ctx.fn(ctx.arg);
+    return nullptr;
+}
+static int thrd_create(thrd_t* t, int (*fn)(void*), void* arg) {
+    auto* ctx = new AppleThreadStart{fn, arg};
+    int result = pthread_create(t, nullptr, apple_thread_start, ctx);
+    if (result)
+        delete ctx;
+    return result;
+}
+static int thrd_join(thrd_t t, int*) {
+    return pthread_join(t, nullptr);
+}
+static thrd_t thrd_current() {
+    return pthread_self();
+}
+static int thrd_sleep(const timespec* t, timespec* remain) {
+    return nanosleep(t, remain);
+}
+static void thrd_yield() {
+    sched_yield();
+}
+static int mtx_init(mtx_t* m, int) {
+    return pthread_mutex_init(m, nullptr);
+}
+static int mtx_destroy(mtx_t* m) {
+    return pthread_mutex_destroy(m);
+}
+static int mtx_lock(mtx_t* m) {
+    return pthread_mutex_lock(m);
+}
+static int mtx_unlock(mtx_t* m) {
+    return pthread_mutex_unlock(m);
+}
+static int cnd_init(cnd_t* c) {
+    return pthread_cond_init(c, nullptr);
+}
+static int cnd_destroy(cnd_t* c) {
+    return pthread_cond_destroy(c);
+}
+static int cnd_wait(cnd_t* c, mtx_t* m) {
+    return pthread_cond_wait(c, m);
+}
+static int cnd_signal(cnd_t* c) {
+    return pthread_cond_signal(c);
+}
+static int cnd_broadcast(cnd_t* c) {
+    return pthread_cond_broadcast(c);
+}
+#else
 #include <threads.h>
+#endif
 #include <time.h>
 }
 

@@ -26,7 +26,7 @@ struct SyscallArgs {
 };
 
 struct DispatchResult {
-    int64_t ret;      // syscall return value (negative => -errno)
+    int64_t ret;      // operation result; -1 on failure (see err)
     int err;          // linux errno when ret < 0, else 0
     bool supported;   // false => -ENOSYS was returned
     const char* note; // never nullptr; explains the outcome

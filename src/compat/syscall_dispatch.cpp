@@ -1,6 +1,8 @@
 // PS5Droid - Linux syscall dispatch experiment (implementation).
 #include "compat/syscall_dispatch.h"
 
+#include <atomic>
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
 
@@ -10,6 +12,69 @@ namespace ps5droid {
 namespace compat {
 
 namespace {
+std::atomic<uint64_t> next_context{0x50534400ull};
+
+// Translate host errno explicitly: FreeBSD/macOS values differ from Linux.
+int linux_error() {
+    switch (errno) {
+    case EPERM:
+        return 1;
+    case ENOENT:
+        return 2;
+    case EINTR:
+        return 4;
+    case EIO:
+        return 5;
+    case EBADF:
+        return 9;
+    case EAGAIN:
+        return 11;
+    case ENOMEM:
+        return 12;
+    case EACCES:
+        return 13;
+    case EFAULT:
+        return 14;
+    case EBUSY:
+        return 16;
+    case EEXIST:
+        return 17;
+    case EXDEV:
+        return 18;
+    case ENODEV:
+        return 19;
+    case ENOTDIR:
+        return 20;
+    case EISDIR:
+        return 21;
+    case EINVAL:
+        return 22;
+    case ENFILE:
+        return 23;
+    case EMFILE:
+        return 24;
+    case EFBIG:
+        return 27;
+    case ENOSPC:
+        return 28;
+    case ESPIPE:
+        return 29;
+    case EROFS:
+        return 30;
+    case EPIPE:
+        return 32;
+    case ERANGE:
+        return 34;
+    case ENAMETOOLONG:
+        return 36;
+    case ENOSYS:
+        return 38;
+    case ELOOP:
+        return 40;
+    default:
+        return 5;
+    }
+}
 
 struct TimespecView { // Linux/Orbis layout, 8+8 bytes on x86_64
     int64_t tv_sec;
@@ -20,7 +85,7 @@ struct TimespecView { // Linux/Orbis layout, 8+8 bytes on x86_64
 
 SyscallDispatch::SyscallDispatch(CompatMemory* memory, CompatFdTable* fd_table)
     : memory_(memory), fd_table_(fd_table ? fd_table : &default_fd_table_),
-      context_id_(0x50534400ull | (platform::monotonic_ns() & 0xffffull)) {}
+      context_id_(next_context.fetch_add(1)) {}
 
 DispatchResult SyscallDispatch::ok(int64_t ret, const char* note) {
     return DispatchResult{ret, 0, true, note};
@@ -84,16 +149,18 @@ DispatchResult SyscallDispatch::invoke(int linux_nr, const SyscallArgs& args) {
         int mode = static_cast<int>(linux_nr == kOpenat ? args.a[3] : args.a[2]);
         if (!path)
             return fail(kEfault, "path is null");
+        if (linux_nr == kOpenat && path[0] != '/' && static_cast<int64_t>(args.a[0]) != -100)
+            return fail(kEnosys, "openat relative dirfd is not implemented");
         int fd = fd_table_->open_file(path, flags, mode);
         if (fd < 0)
-            return fail(kEnoent, "open failed");
+            return fail(linux_error(), "open failed");
         return ok(fd, "fd_table file created");
     }
 
     case kClose: {
         int fd = static_cast<int>(static_cast<int64_t>(args.a[0]));
         if (fd_table_->close(fd) != 0)
-            return fail(kEbadf, "invalid fd");
+            return fail(linux_error(), "invalid fd");
         return ok(0, "fd closed");
     }
 
@@ -105,7 +172,7 @@ DispatchResult SyscallDispatch::invoke(int linux_nr, const SyscallArgs& args) {
             return fail(kEfault, "read buf is null");
         int64_t r = fd_table_->read(fd, buf, count);
         if (r < 0)
-            return fail(kEbadf, "read failed");
+            return fail(linux_error(), "read failed");
         return ok(r, "fd read ok");
     }
 
@@ -118,7 +185,7 @@ DispatchResult SyscallDispatch::invoke(int linux_nr, const SyscallArgs& args) {
             return fail(kEfault, "buf is null");
         int64_t r = fd_table_->pread64(fd, buf, count, off);
         if (r < 0)
-            return fail(kEbadf, "pread64 failed");
+            return fail(linux_error(), "pread64 failed");
         return ok(r, "pread64 ok");
     }
 
@@ -130,7 +197,7 @@ DispatchResult SyscallDispatch::invoke(int linux_nr, const SyscallArgs& args) {
             return fail(kEfault, "write buf is null");
         int64_t n = fd_table_->write(fd, buf, count);
         if (n < 0)
-            return fail(kEbadf, "invalid fd");
+            return fail(linux_error(), "invalid fd");
         return ok(n, "stream/fd write ok");
     }
 
@@ -140,7 +207,7 @@ DispatchResult SyscallDispatch::invoke(int linux_nr, const SyscallArgs& args) {
         int whence = static_cast<int>(args.a[2]);
         int64_t pos = fd_table_->lseek(fd, off, whence);
         if (pos < 0)
-            return fail(kEbadf, "lseek failed");
+            return fail(linux_error(), "lseek failed");
         return ok(pos, "lseek ok");
     }
 
@@ -150,7 +217,7 @@ DispatchResult SyscallDispatch::invoke(int linux_nr, const SyscallArgs& args) {
         if (!st)
             return fail(kEfault, "statbuf is null");
         if (!fd_table_->fstat(fd, st))
-            return fail(kEbadf, "fstat failed");
+            return fail(linux_error(), "fstat failed");
         return ok(0, "fstat ok");
     }
 
@@ -158,7 +225,7 @@ DispatchResult SyscallDispatch::invoke(int linux_nr, const SyscallArgs& args) {
         int oldfd = static_cast<int>(static_cast<int64_t>(args.a[0]));
         int newfd = fd_table_->dup(oldfd);
         if (newfd < 0)
-            return fail(kEbadf, "dup failed");
+            return fail(linux_error(), "dup failed");
         return ok(newfd, "dup ok");
     }
 
@@ -167,14 +234,14 @@ DispatchResult SyscallDispatch::invoke(int linux_nr, const SyscallArgs& args) {
         int newfd = static_cast<int>(static_cast<int64_t>(args.a[1]));
         int res = fd_table_->dup2(oldfd, newfd);
         if (res < 0)
-            return fail(kEbadf, "dup2 failed");
+            return fail(linux_error(), "dup2 failed");
         return ok(res, "dup2 ok");
     }
 
     case kEpollCreate1: {
-        int fd = fd_table_->create_epoll();
+        int fd = fd_table_->create_epoll(static_cast<int>(args.a[0]));
         if (fd < 0)
-            return fail(kEnomem, "epoll_create1 failed");
+            return fail(linux_error(), "epoll_create1 failed");
         return ok(fd, "epoll instance created");
     }
 
@@ -184,7 +251,7 @@ DispatchResult SyscallDispatch::invoke(int linux_nr, const SyscallArgs& args) {
         int target_fd = static_cast<int>(args.a[2]);
         const EpollEvent* event = reinterpret_cast<const EpollEvent*>(args.a[3]);
         if (!fd_table_->epoll_ctl(epfd, op, target_fd, event)) {
-            return fail(kEinval, "epoll_ctl failed");
+            return fail(linux_error(), "epoll_ctl failed");
         }
         return ok(0, "epoll_ctl ok");
     }
@@ -196,7 +263,7 @@ DispatchResult SyscallDispatch::invoke(int linux_nr, const SyscallArgs& args) {
         int timeout = static_cast<int>(args.a[3]);
         int n = fd_table_->epoll_wait(epfd, events, maxevents, timeout);
         if (n < 0)
-            return fail(kEinval, "epoll_wait failed");
+            return fail(linux_error(), "epoll_wait failed");
         return ok(n, "epoll_wait ok");
     }
 
@@ -205,7 +272,7 @@ DispatchResult SyscallDispatch::invoke(int linux_nr, const SyscallArgs& args) {
         int flags = static_cast<int>(args.a[1]);
         int fd = fd_table_->create_eventfd(initval, flags);
         if (fd < 0)
-            return fail(kEnomem, "eventfd creation failed");
+            return fail(linux_error(), "eventfd creation failed");
         return ok(fd, "eventfd created");
     }
 

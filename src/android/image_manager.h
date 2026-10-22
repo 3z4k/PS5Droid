@@ -75,6 +75,10 @@ struct ApkInspection {
     bool has_native_libs = false;
     std::string package_name;
     size_t file_count = 0;
+    int min_sdk = 1; // Android default when uses-sdk is absent
+    int target_sdk = 0;
+    std::vector<std::string> dex_files;
+    std::vector<std::string> native_abis;
     std::string failure_note;
 };
 

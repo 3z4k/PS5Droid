@@ -10,7 +10,10 @@
 #include <cstdio>
 #include <cstring>
 
+#include "android/evidence_report.h"
+#include "android/image_manager.h"
 #include "android/runtime_manager.h"
+#include "compat/elf_runner.h"
 #include "compat/linux_abi.h"
 #include "compat/syscall_dispatch.h"
 #include "platform/platform.h"
@@ -163,6 +166,74 @@ void attempt_android_start() {
 } // namespace
 
 int main(int argc, char** argv) {
+    if (argc > 1 && strcmp(argv[1], "--report-json") == 0) {
+        if (argc < 3) {
+            fprintf(stderr, "--report-json needs an output path or -\n");
+            return 2;
+        }
+        android::EvidenceMetadata metadata;
+        bool probe_exec = false;
+        for (int i = 3; i < argc; ++i) {
+            if (strcmp(argv[i], "--probe-exec") == 0)
+                probe_exec = true;
+            else if (strcmp(argv[i], "--firmware") == 0 && i + 1 < argc)
+                metadata.firmware = argv[++i];
+            else if (strcmp(argv[i], "--loader") == 0 && i + 1 < argc)
+                metadata.loader = argv[++i];
+            else {
+                fprintf(stderr, "unknown or incomplete report option: %s\n", argv[i]);
+                return 2;
+            }
+        }
+        android::RuntimeManager manager;
+        auto report = manager.probe();
+        std::vector<android::Observation> observations;
+        if (probe_exec) {
+            std::string detail;
+            bool accepted = compat::probe_rx_memory(&detail);
+            observations.push_back({"rx_memory", accepted ? "passed" : "failed", detail});
+        } else
+            observations.push_back(
+                {"rx_memory", "not_run", "use --probe-exec to request RW -> RX probe"});
+        auto json = android::evidence_json(report, metadata, observations);
+        if (strcmp(argv[2], "-") == 0)
+            fputs(json.c_str(), stdout);
+        else if (!platform::write_file(argv[2], json.data(), json.size()))
+            return 1;
+        return report.all_passed ? 0 : 1;
+    }
+    if (argc == 3 && strcmp(argv[1], "--inspect-apk") == 0) {
+        auto apk = android::inspect_apk(argv[2]);
+        printf("{\"is_apk\":%s,\"package_name\":%s,\"min_sdk\":%d,\"target_sdk\":%d,\"file_count\":"
+               "%zu,\"dex_files\":[",
+               apk.is_apk ? "true" : "false", android::json_quote(apk.package_name).c_str(),
+               apk.min_sdk, apk.target_sdk, apk.file_count);
+        for (size_t i = 0; i < apk.dex_files.size(); ++i)
+            printf("%s%s", i ? "," : "", android::json_quote(apk.dex_files[i]).c_str());
+        printf("],\"native_abis\":[");
+        for (size_t i = 0; i < apk.native_abis.size(); ++i)
+            printf("%s%s", i ? "," : "", android::json_quote(apk.native_abis[i]).c_str());
+        printf("],\"failure_note\":%s}\n", android::json_quote(apk.failure_note).c_str());
+        return apk.is_apk ? 0 : 1;
+    }
+    if (argc == 3 && strcmp(argv[1], "--run-cooperative-elf") == 0) {
+        std::string bytes;
+        if (!platform::read_file(argv[2], &bytes)) {
+            fprintf(stderr, "cannot read ELF\n");
+            return 1;
+        }
+        auto result = compat::run_cooperative_elf(bytes.data(), bytes.size());
+        printf("executed=%s stop_requested=%s entry_result=%lld\n%s\n",
+               result.executed ? "yes" : "no", result.stop_requested ? "yes" : "no",
+               static_cast<long long>(result.entry_result), result.note.c_str());
+        return result.executed && result.stop_requested && result.entry_result == 0 ? 0 : 1;
+    }
+    if (argc > 1 && strcmp(argv[1], "--matrix") != 0 && strcmp(argv[1], "--start-attempt") != 0) {
+        fprintf(stderr, "usage: ps5droid-host [--matrix | --start-attempt | --inspect-apk FILE | "
+                        "--run-cooperative-elf FILE | --report-json FILE [--probe-exec] "
+                        "[--firmware VALUE] [--loader VALUE]]\n");
+        return 2;
+    }
     print_banner();
     run_probes();
 

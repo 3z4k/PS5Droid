@@ -1,97 +1,80 @@
-// PS5Droid - Binder Re-Hosting Engine (implementation).
 #include "android/binder/binder_engine.h"
-
 #include <cstring>
+#include <memory>
 
 namespace ps5droid {
 namespace android {
-
-BinderEngine::BinderEngine(size_t ring_capacity, size_t alloc_region_size)
-    : ring_(ring_capacity), alloc_buf_(alloc_region_size, 0),
-      allocator_(alloc_buf_.data(), alloc_region_size, 256) {
-    // Handle 0 is implicitly reserved for ServiceManager
-    name_to_handle_["servicemanager"] = 0;
-}
-
+BinderEngine::BinderEngine(size_t max_transactions, size_t region)
+    : storage_(region, 0), allocator_(storage_.data(), region, kMaxPayload),
+      max_transactions_(max_transactions) {}
 uint32_t BinderEngine::register_service(const std::string& name, ServiceHandler handler,
                                         void* user) {
     std::lock_guard<std::mutex> lock(mutex_);
-    auto it = name_to_handle_.find(name);
-    if (it != name_to_handle_.end() && it->second != 0) {
-        return it->second;
-    }
-
+    if (name.empty() || name == "servicemanager" || !handler || next_handle_ == kInvalidHandle)
+        return kInvalidHandle;
+    auto found = names_.find(name);
+    if (found != names_.end())
+        return found->second;
     uint32_t handle = next_handle_++;
-    name_to_handle_[name] = handle;
-    services_[handle] = ServiceEntry{name, handle, handler, user};
+    names_[name] = handle;
+    services_[handle] = {handler, user};
     return handle;
 }
-
 uint32_t BinderEngine::lookup_service(const std::string& name) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    auto it = name_to_handle_.find(name);
-    if (it != name_to_handle_.end()) {
-        return it->second;
-    }
-    return 0; // 0 or invalid
+    auto it = names_.find(name);
+    return it == names_.end() ? kInvalidHandle : it->second;
 }
-
-bool BinderEngine::transact(uint32_t handle, uint32_t code, const std::vector<uint8_t>& in_data,
-                            std::vector<uint8_t>* out_reply) {
-    ServiceHandler handler = nullptr;
-    void* user = nullptr;
+RpcResult BinderEngine::transact_checked(uint32_t handle, uint32_t code,
+                                         const std::vector<uint8_t>& input, uint32_t flags) {
+    if (flags)
+        return {RpcStatus::kUnsupportedFlags, {}};
+    if (input.size() > kMaxPayload)
+        return {RpcStatus::kTooLarge, {}};
+    ServiceEntry service{};
+    void* block;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (handle == 0) {
-            // ServiceManager built-in ping/lookup
-            if (out_reply) {
-                out_reply->assign({'S', 'M', 'O', 'K'});
-            }
-            return true;
-        }
-
         auto it = services_.find(handle);
-        if (it == services_.end()) {
-            return false;
-        }
-        handler = it->second.handler;
-        user = it->second.user;
+        if (it == services_.end())
+            return {RpcStatus::kInvalidHandle, {}};
+        service = it->second;
+        if (active_ >= max_transactions_ || !(block = allocator_.alloc()))
+            return {RpcStatus::kNoMemory, {}};
+        ++active_;
     }
-
-    if (!handler)
-        return false;
-
-    // Allocate transaction buffer via BlockAllocator
-    void* block = allocator_.alloc();
-    if (block) {
-        size_t copy_len = std::min(in_data.size(), allocator_.block_size());
-        if (copy_len > 0) {
-            std::memcpy(block, in_data.data(), copy_len);
-        }
+    auto release = [this](void* p) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        allocator_.free(p);
+        --active_;
+    };
+    std::unique_ptr<void, decltype(release)> owned(block, release);
+    try {
+        if (!input.empty())
+            std::memcpy(block, input.data(), input.size());
+        const auto* first = static_cast<const uint8_t*>(block);
+        std::vector<uint8_t> staged(first, first + input.size());
+        // No engine lock is held across user code: nested calls are allowed.
+        auto reply = service.handler(code, staged, service.user);
+        if (reply.size() > kMaxPayload)
+            return {RpcStatus::kTooLarge, {}};
+        return {RpcStatus::kOk, std::move(reply)};
+    } catch (...) {
+        return {RpcStatus::kHandlerError, {}};
     }
-
-    // Execute in-process transaction
-    std::vector<uint8_t> reply = handler(code, in_data, user);
-    if (out_reply) {
-        *out_reply = reply;
-    }
-
-    if (block) {
-        allocator_.free(block);
-    }
-
-    // Push completion transaction signal through SpscRing
-    ring_.push(static_cast<uint64_t>(BinderReturn::kBrReply));
-    uint64_t dummy;
-    ring_.pop(&dummy);
-
-    return true;
 }
-
+bool BinderEngine::transact(uint32_t handle, uint32_t code, const std::vector<uint8_t>& input,
+                            std::vector<uint8_t>* output) {
+    if (output)
+        output->clear();
+    auto result = transact_checked(handle, code, input);
+    if (output && result.ok())
+        *output = std::move(result.reply);
+    return result.ok();
+}
 size_t BinderEngine::registered_service_count() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return services_.size();
 }
-
 } // namespace android
 } // namespace ps5droid

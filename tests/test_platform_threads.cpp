@@ -102,20 +102,18 @@ PS5DROID_TEST(futex_wouldblock_and_wake) {
 }
 
 PS5DROID_TEST(futex_wake_waiter) {
-    // The main thread sleeps inside wait(); the waker thread changes the
-    // word after a generous delay (1s), guaranteeing the waiter is already
-    // enqueued, then wakes it. The 1s delay only bounds the worst case for
-    // a heavily preempted CI runner; the waiter enqueues within
+    // The main thread sleeps inside wait(); the waker thread wakes it after
+    // a generous delay (1s), without racing a write against the wait check. The 1s delay only
+    // bounds the worst case for a heavily preempted CI runner; the waiter enqueues within
     // microseconds in practice.
     static uint32_t word;
     word = 7;
 
     Thread waker;
     auto waker_fn = [](void*) {
-        ps5droid::platform::sleep_ns(1000000000ull);
-        word = 8;
         Futex f;
-        f.wake(&word, 4);
+        while (f.wake(&word, 1) == 0)
+            ps5droid::platform::yield_thread();
     };
     CHECK_MSG(waker.start(waker_fn, nullptr), "waker start failed");
 
@@ -124,7 +122,7 @@ PS5DROID_TEST(futex_wake_waiter) {
 
     CHECK_MSG(waker.join(), "waker join failed");
     CHECK_MSG(wr == 0, "wait() must return 0 when woken");
-    CHECK_MSG(word == 8, "waker must have changed the word");
+    CHECK_MSG(word == 7, "wake does not modify the futex word");
 }
 
 PS5DROID_TEST(thread_ids_differ) {

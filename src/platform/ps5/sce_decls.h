@@ -52,7 +52,7 @@ int sceKernelReleaseDirectMemory(intptr_t phys_addr, size_t size);
 // ps5-payload-sdk freebsd headers).
 int sceKernelCreateEqueue(struct kevent** queue_out, const char* name);
 int sceKernelWaitEqueue(struct kevent* queue, struct kevent* events_out, int num_events,
-                        int* count_out, unsigned timeout_ms);
+                        int* count_out, uint32_t* timeout_us);
 int sceKernelDeleteEqueue(struct kevent* queue);
 
 // System service: hide the splash screen once the payload is drawing.

@@ -1,159 +1,152 @@
-// PS5Droid - Bionic Loader & TLS/Auxv implementation.
+// Bounded ELF inspection and address-correct initial stack staging.
 #include "compat/bionic_loader.h"
-
+#include <algorithm>
 #include <cstring>
+#include <limits>
 
 namespace ps5droid {
 namespace compat {
-
 namespace {
-
-struct Elf64Ehdr {
-    uint8_t e_ident[16];
-    uint16_t e_type;
-    uint16_t e_machine;
-    uint32_t e_version;
-    uint64_t e_entry;
-    uint64_t e_phoff;
-    uint64_t e_shoff;
-    uint32_t e_flags;
-    uint16_t e_ehsize;
-    uint16_t e_phentsize;
-    uint16_t e_phnum;
-    uint16_t e_shentsize;
-    uint16_t e_shnum;
-    uint16_t e_shstrndx;
+struct Header {
+    uint8_t ident[16];
+    uint16_t type, machine;
+    uint32_t version;
+    uint64_t entry, phoff, shoff;
+    uint32_t flags;
+    uint16_t ehsize, phentsize, phnum, shentsize, shnum, shstrndx;
 };
-
-struct RawElf64Phdr {
-    uint32_t p_type;
-    uint32_t p_flags;
-    uint64_t p_offset;
-    uint64_t p_vaddr;
-    uint64_t p_paddr;
-    uint64_t p_filesz;
-    uint64_t p_memsz;
-    uint64_t p_align;
+struct Phdr {
+    uint32_t type, flags;
+    uint64_t offset, vaddr, paddr, filesz, memsz, align;
 };
-
-constexpr uint32_t PT_INTERP = 3;
-constexpr uint32_t PT_TLS = 7;
-
-constexpr uint64_t AT_NULL = 0;
-constexpr uint64_t AT_PHDR = 3;
-constexpr uint64_t AT_PHENT = 4;
-constexpr uint64_t AT_PHNUM = 5;
-constexpr uint64_t AT_PAGESZ = 6;
-constexpr uint64_t AT_ENTRY = 9;
-
+static_assert(sizeof(Header) == 64 && sizeof(Phdr) == 56, "ELF64 layouts");
+bool range(uint64_t offset, uint64_t length, uint64_t size) {
+    return offset <= size && length <= size - offset;
+}
 } // namespace
-
 BionicElfInfo BionicLoader::parse_header(const void* data, size_t size) {
-    BionicElfInfo res;
-    if (!data || size < sizeof(Elf64Ehdr)) {
-        res.error = "buffer too small for ELF header";
-        return res;
-    }
-
-    const auto* ehdr = static_cast<const Elf64Ehdr*>(data);
-    if (ehdr->e_ident[0] != 0x7f || ehdr->e_ident[1] != 'E' || ehdr->e_ident[2] != 'L' ||
-        ehdr->e_ident[3] != 'F') {
-        res.error = "invalid ELF magic";
-        return res;
-    }
-
-    if (ehdr->e_ident[4] != 2 /* 64-bit */ || ehdr->e_machine != 62 /* x86_64 */) {
-        res.error = "not ELF64 x86_64";
-        return res;
-    }
-
-    res.valid = true;
-    res.entry_point = ehdr->e_entry;
-
-    if (ehdr->e_phoff + static_cast<uint64_t>(ehdr->e_phnum) * sizeof(RawElf64Phdr) > size) {
-        res.error = "program headers exceed file buffer";
-        res.valid = false;
-        return res;
-    }
-
-    const auto* phdrs =
-        reinterpret_cast<const RawElf64Phdr*>(static_cast<const uint8_t*>(data) + ehdr->e_phoff);
-
-    for (uint16_t i = 0; i < ehdr->e_phnum; ++i) {
-        Elf64PhdrInfo info;
-        info.type = phdrs[i].p_type;
-        info.flags = phdrs[i].p_flags;
-        info.offset = phdrs[i].p_offset;
-        info.vaddr = phdrs[i].p_vaddr;
-        info.paddr = phdrs[i].p_paddr;
-        info.filesz = phdrs[i].p_filesz;
-        info.memsz = phdrs[i].p_memsz;
-        info.align = phdrs[i].p_align;
-        res.phdrs.push_back(info);
-
-        if (phdrs[i].p_type == PT_INTERP) {
-            if (phdrs[i].p_offset + phdrs[i].p_filesz <= size) {
-                const char* interp_str = reinterpret_cast<const char*>(
-                    static_cast<const uint8_t*>(data) + phdrs[i].p_offset);
-                res.interp.assign(interp_str, phdrs[i].p_filesz);
-                if (!res.interp.empty() && res.interp.back() == '\0') {
-                    res.interp.pop_back();
-                }
-                if (res.interp.find("linker") != std::string::npos) {
-                    res.is_bionic = true;
-                }
-            }
-        } else if (phdrs[i].p_type == PT_TLS) {
-            res.tls_filesz = phdrs[i].p_filesz;
-            res.tls_memsz = phdrs[i].p_memsz;
-            res.tls_align = phdrs[i].p_align;
+    BionicElfInfo out;
+    auto fail = [&](const char* note) {
+        out.valid = false;
+        out.error = note;
+        return out;
+    };
+    if (!data || size < sizeof(Header))
+        return fail("truncated ELF header");
+    Header header{};
+    std::memcpy(&header, data, sizeof(header));
+    if (std::memcmp(header.ident, "\177ELF", 4))
+        return fail("invalid ELF magic");
+    if (header.ident[4] != 2 || header.ident[5] != 1 || header.ident[6] != 1 ||
+        header.machine != 62 || header.version != 1)
+        return fail("requires little-endian ELF64 x86_64 version 1");
+    if ((header.type != 2 && header.type != 3) || header.ehsize != sizeof(Header) ||
+        header.phentsize != sizeof(Phdr) || !header.phnum || header.phnum > 1024)
+        return fail("invalid ELF type or program header layout");
+    if (!range(header.phoff, uint64_t(header.phnum) * sizeof(Phdr), size))
+        return fail("program headers exceed file buffer");
+    out.entry_point = header.entry;
+    out.phdr_offset = header.phoff;
+    out.elf_type = header.type;
+    const auto* bytes = static_cast<const uint8_t*>(data);
+    bool entry_mapped = false;
+    for (uint16_t i = 0; i < header.phnum; ++i) {
+        Phdr p{};
+        std::memcpy(&p, bytes + header.phoff + i * sizeof(p), sizeof(p));
+        if (!range(p.offset, p.filesz, size) || p.memsz < p.filesz ||
+            p.memsz > UINT64_MAX - p.vaddr)
+            return fail("invalid segment range");
+        if (p.align > 1 && ((p.align & (p.align - 1)) || p.vaddr % p.align != p.offset % p.align))
+            return fail("invalid segment alignment");
+        out.phdrs.push_back(
+            {p.type, p.flags, p.offset, p.vaddr, p.paddr, p.filesz, p.memsz, p.align});
+        if (p.type == 1 && (p.flags & 1) && header.entry >= p.vaddr &&
+            header.entry - p.vaddr < p.memsz)
+            entry_mapped = true;
+        if (p.type == 3) {
+            if (!out.interp.empty() || p.filesz < 2 || p.filesz > 4096 ||
+                bytes[p.offset + p.filesz - 1] != 0)
+                return fail("invalid PT_INTERP string");
+            out.interp.assign(reinterpret_cast<const char*>(bytes + p.offset), p.filesz - 1);
+            if (out.interp.find('\0') != std::string::npos)
+                return fail("embedded NUL in interpreter");
+            out.is_bionic = out.interp == "/system/bin/linker64" ||
+                            out.interp == "/apex/com.android.runtime/bin/linker64";
+        } else if (p.type == 7) {
+            out.tls_filesz = p.filesz;
+            out.tls_memsz = p.memsz;
+            out.tls_align = p.align;
         }
     }
-
-    return res;
+    if (!entry_mapped)
+        return fail("entry point is outside executable PT_LOAD segments");
+    out.valid = true;
+    return out;
 }
-
 std::vector<AuxvEntry> BionicLoader::build_auxv(uint64_t entry, uint64_t phdr, uint64_t phnum,
                                                 uint64_t pagesz) {
-    std::vector<AuxvEntry> auxv;
-    auxv.push_back({AT_PHDR, phdr});
-    auxv.push_back({AT_PHENT, sizeof(RawElf64Phdr)});
-    auxv.push_back({AT_PHNUM, phnum});
-    auxv.push_back({AT_PAGESZ, pagesz});
-    auxv.push_back({AT_ENTRY, entry});
-    auxv.push_back({AT_NULL, 0});
-    return auxv;
+    return {{3, phdr}, {4, 56}, {5, phnum}, {6, pagesz}, {9, entry}, {0, 0}};
 }
-
+InitialStack BionicLoader::build_initial_stack(const BionicElfInfo& info,
+                                               const std::vector<std::string>& args,
+                                               const std::vector<std::string>& env,
+                                               uint64_t guest_base, uint64_t phdr_address,
+                                               uint64_t load_bias, uint64_t pagesz) {
+    InitialStack out;
+    if (!info.valid || !pagesz || (pagesz & (pagesz - 1)) ||
+        load_bias > UINT64_MAX - info.entry_point) {
+        out.error = "invalid ELF or stack addresses";
+        return out;
+    }
+    constexpr size_t limit = 1024 * 1024;
+    if (args.size() > 4096 || env.size() > 4096) {
+        out.error = "argument count exceeds limit";
+        return out;
+    }
+    auto auxv = build_auxv(load_bias + info.entry_point, phdr_address, info.phdrs.size(), pagesz);
+    size_t total = (1 + args.size() + 1 + env.size() + 1 + auxv.size() * 2) * 8;
+    const size_t strings_begin = total;
+    for (const auto* list : {&args, &env})
+        for (const auto& text : *list) {
+            if (text.find('\0') != std::string::npos || text.size() >= limit - total) {
+                out.error = "invalid or oversized argument data";
+                return out;
+            }
+            total += text.size() + 1;
+        }
+    total = (total + 15) & ~size_t(15);
+    out.bytes.resize(total, 0);
+    uint64_t base = guest_base ? guest_base : reinterpret_cast<uint64_t>(out.bytes.data());
+    if (base % 16 || base > UINT64_MAX - total) {
+        out.bytes.clear();
+        out.error = "stack base must be aligned and non-overflowing";
+        return out;
+    }
+    out.stack_pointer = base;
+    size_t word = 0, string_pos = strings_begin;
+    auto push = [&](uint64_t value) {
+        std::memcpy(out.bytes.data() + word, &value, 8);
+        word += 8;
+    };
+    push(args.size());
+    for (const auto* list : {&args, &env}) {
+        for (const auto& text : *list) {
+            push(base + string_pos);
+            std::memcpy(out.bytes.data() + string_pos, text.c_str(), text.size() + 1);
+            string_pos += text.size() + 1;
+        }
+        push(0);
+    }
+    for (auto a : auxv) {
+        push(a.type);
+        push(a.val);
+    }
+    return out;
+}
 std::vector<uint8_t> BionicLoader::setup_initial_stack(const BionicElfInfo& info,
                                                        const std::vector<std::string>& args,
                                                        const std::vector<std::string>& env) {
-    std::vector<uint8_t> stack;
-    auto auxv = build_auxv(info.entry_point, 0x400000, info.phdrs.size());
-
-    // Basic layout simulation: argc, argv pointers, env pointers, auxv pairs
-    uint64_t argc = args.size();
-    stack.resize(4096, 0);
-    uint64_t* ptr = reinterpret_cast<uint64_t*>(stack.data());
-
-    *ptr++ = argc;
-    for (size_t i = 0; i < args.size(); ++i) {
-        *ptr++ = 0x7fffffffe000 + i * 32;
-    }
-    *ptr++ = 0; // NULL argv terminator
-
-    for (size_t i = 0; i < env.size(); ++i) {
-        *ptr++ = 0x7fffffffe800 + i * 32;
-    }
-    *ptr++ = 0; // NULL env terminator
-
-    for (const auto& a : auxv) {
-        *ptr++ = a.type;
-        *ptr++ = a.val;
-    }
-
-    return stack;
+    return build_initial_stack(info, args, env, 0, 0, 0, 4096).bytes;
 }
-
 } // namespace compat
 } // namespace ps5droid

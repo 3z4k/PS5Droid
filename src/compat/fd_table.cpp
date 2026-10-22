@@ -1,336 +1,388 @@
-// PS5Droid - Guest File Descriptor Table and Epoll implementation.
+// Linux guest descriptors. Native flags and errno never cross the guest ABI.
 #include "compat/fd_table.h"
+#include "platform/platform.h"
 
 #include <algorithm>
-#include <cstdio>
+#include <cerrno>
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
-
-#include "platform/platform.h"
+#include <fcntl.h>
+#include <limits>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace ps5droid {
 namespace compat {
 
+struct FdSignal {
+    std::mutex mutex;
+    std::condition_variable changed;
+    uint64_t generation = 0;
+    void notify() {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            ++generation;
+        }
+        changed.notify_all();
+    }
+};
 namespace {
+int bad(int error) {
+    errno = error;
+    return -1;
+}
 
-class FileFdEntry : public FdEntry {
+class NativeFd : public FdEntry {
   public:
-    FileFdEntry(const std::string& path, FILE* fp) : path_(path), fp_(fp) {}
-    ~FileFdEntry() override { close(); }
-
-    FdType type() const override { return FdType::kFile; }
-
+    NativeFd(int fd, bool owned, FdType type) : fd_(fd), owned_(owned), type_(type) {}
+    ~NativeFd() override {
+        if (owned_)
+            ::close(fd_);
+    }
+    FdType type() const override { return type_; }
     int64_t read(void* buf, size_t count, int64_t offset) override {
-        if (!fp_)
-            return -1;
-        if (offset >= 0) {
-            fseek(fp_, static_cast<long>(offset), SEEK_SET);
-        }
-        size_t r = fread(buf, 1, count, fp_);
-        return static_cast<int64_t>(r);
+        if (count > static_cast<size_t>(std::numeric_limits<ssize_t>::max()))
+            return bad(EINVAL);
+        return offset < 0 ? ::read(fd_, buf, count) : ::pread(fd_, buf, count, offset);
     }
-
     int64_t write(const void* buf, size_t count, int64_t offset) override {
-        if (!fp_)
-            return -1;
-        if (offset >= 0) {
-            fseek(fp_, static_cast<long>(offset), SEEK_SET);
-        }
-        size_t w = fwrite(buf, 1, count, fp_);
-        fflush(fp_);
-        return static_cast<int64_t>(w);
+        if (count > static_cast<size_t>(std::numeric_limits<ssize_t>::max()))
+            return bad(EINVAL);
+        return offset < 0 ? ::write(fd_, buf, count) : ::pwrite(fd_, buf, count, offset);
     }
-
-    int64_t lseek(int64_t offset, int whence) override {
-        if (!fp_)
-            return -1;
-        if (fseek(fp_, static_cast<long>(offset), whence) != 0) {
-            return -1;
-        }
-        return static_cast<int64_t>(ftell(fp_));
-    }
-
-    bool fstat(StatBuf* statbuf) override {
-        if (!statbuf || !fp_)
+    int64_t lseek(int64_t offset, int whence) override { return ::lseek(fd_, offset, whence); }
+    bool fstat(StatBuf* out) override {
+        if (!out) {
+            bad(EFAULT);
             return false;
-        memset(statbuf, 0, sizeof(*statbuf));
-        long cur = ftell(fp_);
-        fseek(fp_, 0, SEEK_END);
-        long sz = ftell(fp_);
-        fseek(fp_, cur, SEEK_SET);
-        statbuf->st_size = sz;
-        statbuf->st_mode = 0100644; // S_IFREG
+        }
+        struct stat st{};
+        if (::fstat(fd_, &st) != 0)
+            return false;
+        *out = {};
+        out->st_dev = st.st_dev;
+        out->st_ino = st.st_ino;
+        out->st_nlink = st.st_nlink;
+        out->st_mode = st.st_mode;
+        out->st_uid = st.st_uid;
+        out->st_gid = st.st_gid;
+        out->st_rdev = st.st_rdev;
+        out->st_size = st.st_size;
+        out->st_blksize = st.st_blksize;
+        out->st_blocks = st.st_blocks;
+        out->st_atime_sec = st.st_atime;
+        out->st_mtime_sec = st.st_mtime;
+        out->st_ctime_sec = st.st_ctime;
+#if defined(__APPLE__)
+        out->st_atime_nsec = st.st_atimespec.tv_nsec;
+        out->st_mtime_nsec = st.st_mtimespec.tv_nsec;
+        out->st_ctime_nsec = st.st_ctimespec.tv_nsec;
+#else
+        out->st_atime_nsec = st.st_atim.tv_nsec;
+        out->st_mtime_nsec = st.st_mtim.tv_nsec;
+        out->st_ctime_nsec = st.st_ctim.tv_nsec;
+#endif
         return true;
     }
-
-    void close() override {
-        if (fp_) {
-            fclose(fp_);
-            fp_ = nullptr;
-        }
-    }
+    // Lifetime belongs to the shared open-file description, not one descriptor.
+    void close() override {}
 
   private:
-    std::string path_;
-    FILE* fp_;
+    int fd_;
+    bool owned_;
+    FdType type_;
 };
 
-class StreamFdEntry : public FdEntry {
+class EventFd : public FdEntry {
   public:
-    explicit StreamFdEntry(FILE* stream) : stream_(stream) {}
-    FdType type() const override { return FdType::kStream; }
-
-    int64_t read(void*, size_t, int64_t) override { return -1; }
-    int64_t write(const void* buf, size_t count, int64_t) override {
-        if (!stream_ || !buf)
-            return -1;
-        size_t w = fwrite(buf, 1, count, stream_);
-        fflush(stream_);
-        return static_cast<int64_t>(w);
-    }
-    int64_t lseek(int64_t, int) override { return -1; }
-    bool fstat(StatBuf* statbuf) override {
-        if (!statbuf)
-            return false;
-        memset(statbuf, 0, sizeof(*statbuf));
-        statbuf->st_mode = 0020666; // S_IFCHR
-        return true;
-    }
-    void close() override { stream_ = nullptr; }
-
-  private:
-    FILE* stream_;
-};
-
-class EpollFdEntry : public FdEntry {
-  public:
-    EpollFdEntry() = default;
-    FdType type() const override { return FdType::kEpoll; }
-
-    int64_t read(void*, size_t, int64_t) override { return -1; }
-    int64_t write(const void*, size_t, int64_t) override { return -1; }
-    int64_t lseek(int64_t, int) override { return -1; }
-    bool fstat(StatBuf* statbuf) override {
-        if (!statbuf)
-            return false;
-        memset(statbuf, 0, sizeof(*statbuf));
-        return true;
-    }
-    void close() override { events_.clear(); }
-
-    bool ctl(int op, int fd, const EpollEvent* event) {
-        if (op == 1 /* EPOLL_CTL_ADD */) {
-            if (!event)
-                return false;
-            events_[fd] = *event;
-            return true;
-        } else if (op == 2 /* EPOLL_CTL_DEL */) {
-            events_.erase(fd);
-            return true;
-        } else if (op == 3 /* EPOLL_CTL_MOD */) {
-            if (!event || events_.find(fd) == events_.end())
-                return false;
-            events_[fd] = *event;
-            return true;
-        }
-        return false;
-    }
-
-    int wait(EpollEvent* out_events, int maxevents, int timeout_ms) {
-        if (!out_events || maxevents <= 0)
-            return -1;
-        int count = 0;
-        for (const auto& kv : events_) {
-            if (count >= maxevents)
-                break;
-            out_events[count++] = kv.second;
-        }
-        if (count == 0 && timeout_ms > 0) {
-            platform::sleep_ns(static_cast<uint64_t>(timeout_ms) * 1000000ull);
-        }
-        return count;
-    }
-
-  private:
-    std::unordered_map<int, EpollEvent> events_;
-};
-
-class EventFdEntry : public FdEntry {
-  public:
-    explicit EventFdEntry(uint64_t initval) : counter_(initval) {}
+    EventFd(uint64_t value, int flags, std::shared_ptr<FdSignal> signal)
+        : value_(value), flags_(flags), signal_(std::move(signal)) {}
     FdType type() const override { return FdType::kEventFd; }
-
-    int64_t read(void* buf, size_t count, int64_t) override {
-        if (count < sizeof(uint64_t) || !buf)
-            return -1;
-        uint64_t val = counter_;
-        counter_ = 0;
-        std::memcpy(buf, &val, sizeof(uint64_t));
-        return sizeof(uint64_t);
+    int64_t read(void* buf, size_t count, int64_t offset) override {
+        if (offset >= 0)
+            return bad(ESPIPE);
+        if (count < 8)
+            return bad(EINVAL);
+        if (!buf)
+            return bad(EFAULT);
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!value_ && (flags_ & 0x800))
+            return bad(EAGAIN);
+        changed_.wait(lock, [&] { return value_ != 0; });
+        uint64_t value = (flags_ & 1) ? 1 : value_;
+        value_ -= value;
+        std::memcpy(buf, &value, 8);
+        lock.unlock();
+        changed_.notify_all();
+        signal_->notify();
+        return 8;
     }
-
-    int64_t write(const void* buf, size_t count, int64_t) override {
-        if (count < sizeof(uint64_t) || !buf)
-            return -1;
-        uint64_t val = 0;
-        std::memcpy(&val, buf, sizeof(uint64_t));
-        counter_ += val;
-        return sizeof(uint64_t);
+    int64_t write(const void* buf, size_t count, int64_t offset) override {
+        if (offset >= 0)
+            return bad(ESPIPE);
+        if (count != 8)
+            return bad(EINVAL);
+        if (!buf)
+            return bad(EFAULT);
+        uint64_t value;
+        std::memcpy(&value, buf, 8);
+        if (value == UINT64_MAX)
+            return bad(EINVAL);
+        std::unique_lock<std::mutex> lock(mutex_);
+        auto fits = [&] { return value <= UINT64_MAX - 1 - value_; };
+        if (!fits() && (flags_ & 0x800))
+            return bad(EAGAIN);
+        changed_.wait(lock, fits);
+        value_ += value;
+        lock.unlock();
+        changed_.notify_all();
+        signal_->notify();
+        return 8;
     }
-
-    int64_t lseek(int64_t, int) override { return -1; }
-    bool fstat(StatBuf* statbuf) override {
-        if (!statbuf)
+    uint32_t ready() override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return (value_ ? 1u : 0u) | (value_ < UINT64_MAX - 1 ? 4u : 0u);
+    }
+    int64_t lseek(int64_t, int) override { return bad(ESPIPE); }
+    bool fstat(StatBuf* out) override {
+        if (!out) {
+            bad(EFAULT);
             return false;
-        memset(statbuf, 0, sizeof(*statbuf));
+        }
+        *out = {};
+        out->st_mode = 0600;
         return true;
     }
-    void close() override { counter_ = 0; }
+    void close() override {}
 
   private:
-    uint64_t counter_ = 0;
+    std::mutex mutex_;
+    std::condition_variable changed_;
+    uint64_t value_;
+    int flags_;
+    std::shared_ptr<FdSignal> signal_;
 };
 
+class EpollFd : public FdEntry {
+  public:
+    explicit EpollFd(std::shared_ptr<FdSignal> signal) : signal_(std::move(signal)) {}
+    FdType type() const override { return FdType::kEpoll; }
+    int64_t read(void*, size_t, int64_t) override { return bad(EINVAL); }
+    int64_t write(const void*, size_t, int64_t) override { return bad(EINVAL); }
+    int64_t lseek(int64_t, int) override { return bad(ESPIPE); }
+    bool fstat(StatBuf* out) override {
+        if (!out) {
+            bad(EFAULT);
+            return false;
+        }
+        *out = {};
+        out->st_mode = 0600;
+        return true;
+    }
+    void close() override {}
+    bool ctl(int op, int fd, const std::shared_ptr<FdEntry>& target, const EpollEvent* event) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = events_.find(fd);
+        if (it != events_.end() && it->second.target.expired()) {
+            events_.erase(it);
+            it = events_.end();
+        }
+        if (op < 1 || op > 3) {
+            bad(EINVAL);
+            return false;
+        }
+        if (op != 2 && (!event || (event->events & ~0x1du))) {
+            bad(EINVAL);
+            return false;
+        }
+        if (op == 1 && it != events_.end()) {
+            bad(EEXIST);
+            return false;
+        }
+        if (op != 1 && it == events_.end()) {
+            bad(ENOENT);
+            return false;
+        }
+        if (op == 2)
+            events_.erase(it);
+        else
+            events_[fd] = Watch{target, *event};
+        signal_->notify();
+        return true;
+    }
+    int wait(EpollEvent* out, int maxevents, int timeout_ms) {
+        if (!out)
+            return bad(EFAULT);
+        if (maxevents <= 0)
+            return bad(EINVAL);
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(std::max(timeout_ms, 0));
+        for (;;) {
+            uint64_t generation;
+            {
+                std::lock_guard<std::mutex> lock(signal_->mutex);
+                generation = signal_->generation;
+            }
+            int count = 0;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                for (auto it = events_.begin(); it != events_.end();) {
+                    auto target = it->second.target.lock();
+                    if (!target) {
+                        it = events_.erase(it);
+                        continue;
+                    }
+                    uint32_t ready = target->ready() & (it->second.event.events | 0x18u);
+                    if (ready && count < maxevents)
+                        out[count++] = {ready, it->second.event.data};
+                    ++it;
+                }
+            }
+            if (count || timeout_ms == 0)
+                return count;
+            std::unique_lock<std::mutex> lock(signal_->mutex);
+            auto changed = [&] { return signal_->generation != generation; };
+            if (timeout_ms < 0)
+                signal_->changed.wait(lock, changed);
+            else if (!signal_->changed.wait_until(lock, deadline, changed))
+                return 0;
+        }
+    }
+
+  private:
+    struct Watch {
+        std::weak_ptr<FdEntry> target;
+        EpollEvent event;
+    };
+    std::mutex mutex_;
+    std::unordered_map<int, Watch> events_;
+    std::shared_ptr<FdSignal> signal_;
+};
 } // namespace
 
-CompatFdTable::CompatFdTable() {
-    table_[0] = std::make_shared<StreamFdEntry>(stdin);
-    table_[1] = std::make_shared<StreamFdEntry>(stdout);
-    table_[2] = std::make_shared<StreamFdEntry>(stderr);
+CompatFdTable::CompatFdTable() : signal_(std::make_shared<FdSignal>()) {
+    for (int fd = 0; fd < 3; ++fd)
+        table_[fd] = std::make_shared<NativeFd>(fd, false, FdType::kStream);
 }
-
-CompatFdTable::~CompatFdTable() {
+CompatFdTable::~CompatFdTable() = default;
+int CompatFdTable::insert(std::shared_ptr<FdEntry> entry) {
     std::lock_guard<std::mutex> lock(mutex_);
-    table_.clear();
-}
-
-int CompatFdTable::open_file(const std::string& path, int flags, int mode) {
-    (void)mode;
-    std::lock_guard<std::mutex> lock(mutex_);
-    const char* fmode = "r";
-    if ((flags & 0x3) == 1)
-        fmode = "w";
-    else if ((flags & 0x3) == 2)
-        fmode = "r+";
-    if (flags & 0x200 /* O_CREAT */) {
-        if (flags & 0x400 /* O_TRUNC */)
-            fmode = "w+";
-        else
-            fmode = "a+";
+    int fd = 0;
+    while (table_.count(fd)) {
+        if (fd == INT32_MAX)
+            return bad(EMFILE);
+        ++fd;
     }
-
-    FILE* fp = fopen(path.c_str(), fmode);
-    if (!fp)
-        return -1;
-
-    int fd = next_fd_++;
-    table_[fd] = std::make_shared<FileFdEntry>(path, fp);
+    table_[fd] = std::move(entry);
     return fd;
 }
-
-int CompatFdTable::create_epoll() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    int fd = next_fd_++;
-    table_[fd] = std::make_shared<EpollFdEntry>();
-    return fd;
+int CompatFdTable::open_file(const std::string& path, int flags, int mode) {
+    constexpr int allowed =
+        3 | 0x40 | 0x80 | 0x100 | 0x200 | 0x400 | 0x800 | 0x8000 | 0x10000 | 0x20000 | 0x80000;
+    if ((flags & ~allowed) || (flags & 3) == 3)
+        return bad(EINVAL);
+    int native = (flags & 3) == 2 ? O_RDWR : (flags & 3) == 1 ? O_WRONLY : O_RDONLY;
+    const int guest[] = {0x40, 0x80, 0x100, 0x200, 0x400, 0x800, 0x10000, 0x20000, 0x80000};
+    const int host[] = {O_CREAT,    O_EXCL,      O_NOCTTY,   O_TRUNC,  O_APPEND,
+                        O_NONBLOCK, O_DIRECTORY, O_NOFOLLOW, O_CLOEXEC};
+    for (size_t i = 0; i < sizeof(guest) / sizeof(guest[0]); ++i)
+        if (flags & guest[i])
+            native |= host[i];
+    int fd = ::open(path.c_str(), native, static_cast<mode_t>(mode & 07777));
+    return fd < 0 ? -1 : insert(std::make_shared<NativeFd>(fd, true, FdType::kFile));
 }
-
+int CompatFdTable::create_epoll(int flags) {
+    if (flags & ~0x80000)
+        return bad(EINVAL);
+    return insert(std::make_shared<EpollFd>(signal_));
+}
 int CompatFdTable::create_eventfd(uint64_t initval, int flags) {
-    (void)flags;
-    std::lock_guard<std::mutex> lock(mutex_);
-    int fd = next_fd_++;
-    table_[fd] = std::make_shared<EventFdEntry>(initval);
-    return fd;
+    if ((flags & ~(1 | 0x800 | 0x80000)) || initval > UINT32_MAX)
+        return bad(EINVAL);
+    return insert(std::make_shared<EventFd>(initval, flags, signal_));
 }
-
 bool CompatFdTable::epoll_ctl(int epfd, int op, int fd, const EpollEvent* event) {
-    auto entry = get(epfd);
-    if (!entry || entry->type() != FdType::kEpoll)
+    auto ep = get(epfd);
+    if (!ep)
         return false;
-    auto epoll = std::static_pointer_cast<EpollFdEntry>(entry);
-    return epoll->ctl(op, fd, event);
+    auto target = get(fd);
+    if (!target)
+        return false;
+    if (ep->type() != FdType::kEpoll || epfd == fd) {
+        bad(EINVAL);
+        return false;
+    }
+    // Only eventfd level-triggered readiness is implemented. Never fabricate file readiness.
+    if (target->type() != FdType::kEventFd) {
+        bad(EPERM);
+        return false;
+    }
+    return std::static_pointer_cast<EpollFd>(ep)->ctl(op, fd, target, event);
 }
-
 int CompatFdTable::epoll_wait(int epfd, EpollEvent* events, int maxevents, int timeout_ms) {
-    auto entry = get(epfd);
-    if (!entry || entry->type() != FdType::kEpoll)
+    auto ep = get(epfd);
+    if (!ep)
         return -1;
-    auto epoll = std::static_pointer_cast<EpollFdEntry>(entry);
-    return epoll->wait(events, maxevents, timeout_ms);
+    if (ep->type() != FdType::kEpoll)
+        return bad(EINVAL);
+    return std::static_pointer_cast<EpollFd>(ep)->wait(events, maxevents, timeout_ms);
 }
-
 int64_t CompatFdTable::read(int fd, void* buf, size_t count) {
-    auto entry = get(fd);
-    if (!entry)
-        return -1;
-    return entry->read(buf, count, -1);
+    auto e = get(fd);
+    return e ? e->read(buf, count) : -1;
 }
-
 int64_t CompatFdTable::pread64(int fd, void* buf, size_t count, int64_t offset) {
-    auto entry = get(fd);
-    if (!entry)
-        return -1;
-    return entry->read(buf, count, offset);
+    if (offset < 0)
+        return bad(EINVAL);
+    auto e = get(fd);
+    return e ? e->read(buf, count, offset) : -1;
 }
-
 int64_t CompatFdTable::write(int fd, const void* buf, size_t count) {
-    auto entry = get(fd);
-    if (!entry)
-        return -1;
-    return entry->write(buf, count, -1);
+    auto e = get(fd);
+    return e ? e->write(buf, count) : -1;
 }
-
 int64_t CompatFdTable::lseek(int fd, int64_t offset, int whence) {
-    auto entry = get(fd);
-    if (!entry)
-        return -1;
-    return entry->lseek(offset, whence);
+    if (whence < 0 || whence > 2)
+        return bad(EINVAL);
+    auto e = get(fd);
+    return e ? e->lseek(offset, whence) : -1;
 }
-
-bool CompatFdTable::fstat(int fd, StatBuf* statbuf) {
-    auto entry = get(fd);
-    if (!entry)
-        return false;
-    return entry->fstat(statbuf);
+bool CompatFdTable::fstat(int fd, StatBuf* out) {
+    auto e = get(fd);
+    return e && e->fstat(out);
 }
-
 int CompatFdTable::dup(int oldfd) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = table_.find(oldfd);
-    if (it == table_.end())
-        return -1;
-    int newfd = next_fd_++;
-    table_[newfd] = it->second;
-    return newfd;
+    auto e = get(oldfd);
+    return e ? insert(e) : -1;
 }
-
 int CompatFdTable::dup2(int oldfd, int newfd) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = table_.find(oldfd);
     if (it == table_.end() || newfd < 0)
-        return -1;
-    table_[newfd] = it->second;
-    if (newfd >= next_fd_)
-        next_fd_ = newfd + 1;
+        return bad(EBADF);
+    auto entry = it->second;
+    table_[newfd] = std::move(entry);
+    signal_->notify();
     return newfd;
 }
-
 int CompatFdTable::close(int fd) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = table_.find(fd);
-    if (it == table_.end())
-        return -1;
-    it->second->close();
-    table_.erase(it);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!table_.erase(fd))
+            return bad(EBADF);
+    }
+    signal_->notify();
     return 0;
 }
-
 std::shared_ptr<FdEntry> CompatFdTable::get(int fd) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = table_.find(fd);
-    if (it == table_.end())
+    if (it == table_.end()) {
+        bad(EBADF);
         return nullptr;
+    }
     return it->second;
 }
-
 } // namespace compat
 } // namespace ps5droid

@@ -3,6 +3,8 @@
 
 #include <atomic>
 #include <cstring>
+#include <unistd.h>
+#include <vector>
 
 #include "compat/ipc_compat.h"
 #include "compat/memory_compat.h"
@@ -27,7 +29,7 @@ void probe_thread_fn(void* raw) {
 
 } // namespace
 
-CapabilityReport RuntimeManager::probe() {
+CapabilityReport RuntimeManager::probe(const std::string& writable_dir) {
     phase_ = RuntimePhase::kProbing;
     CapabilityReport report;
     report.backend = platform::backend_name();
@@ -76,9 +78,9 @@ CapabilityReport RuntimeManager::probe() {
         platform::Thread threads[4];
         bool ok = true;
         for (auto& t : threads)
-            ok = ok && t.start(probe_thread_fn, &ctx);
+            ok = t.start(probe_thread_fn, &ctx) && ok;
         for (auto& t : threads)
-            ok = ok && t.join();
+            ok = t.join() && ok;
         ok = ok && counter.load() == 4;
         add("threads", ok, ok ? "4 threads started and joined" : "thread create/join failed");
     }
@@ -95,15 +97,26 @@ CapabilityReport RuntimeManager::probe() {
 
     // 6. filesystem write/read
     {
-        std::string tmp = "ps5droid_probe.tmp";
+        std::string pattern = writable_dir + "/ps5droid-probe-XXXXXX";
+        std::vector<char> path(pattern.begin(), pattern.end());
+        path.push_back(0);
+        int fd = mkstemp(path.data());
+        std::string tmp = path.data();
         const char* payload = "ps5droid fs probe";
-        bool passed = platform::write_file(tmp, payload, strlen(payload));
+        bool passed = fd >= 0;
+        if (fd >= 0) {
+            passed = ::write(fd, payload, strlen(payload)) == static_cast<ssize_t>(strlen(payload));
+            passed = (::close(fd) == 0) && passed;
+        }
         if (passed) {
             std::string readback;
             passed = platform::read_file(tmp, &readback) && readback == payload;
-            platform::remove_file(tmp);
         }
-        add("filesystem", passed, passed ? "write/read/remove ok" : "failed");
+        if (fd >= 0)
+            passed = platform::remove_file(tmp) && passed;
+        add("filesystem", passed,
+            passed ? "exclusive temporary file write/read/remove ok in " + writable_dir
+                   : "temporary file probe failed in " + writable_dir);
     }
 
     // 7. cross-thread IPC ring
@@ -210,9 +223,10 @@ StartAttempt RuntimeManager::attempt_start() {
         "process_model", "Android requires fork()/clone() and a zygote. Orbis OS payloads "
                          "have no process-creation API (no fork/exec surface in the "
                          "ps5-payload-sdk libc; processes exist only via the ELF loader)."});
-    attempt.blockers.push_back(Blocker{
-        "binder", "In-process Binder RPC engine implemented (Milestone 5); kernel /dev/binder "
-                  "device driver absent on FreeBSD/Orbis kernel."});
+    attempt.blockers.push_back(Blocker{"binder",
+                                       "Bounded synchronous in-process RPC experiment only; no "
+                                       "Android Binder protocol; kernel /dev/binder "
+                                       "device driver absent on FreeBSD/Orbis kernel."});
     attempt.blockers.push_back(Blocker{
         "filesystem_layout", "Android images are ext4 (system.img/vendor.img). Orbis exposes "
                              "no loop devices, no FUSE and no ext4 driver; images and APKs can be "
@@ -221,10 +235,10 @@ StartAttempt RuntimeManager::attempt_start() {
         Blocker{"graphics_services", "SurfaceFlinger and the Waydroid hwcomposer HAL assume a "
                                      "compositor/wayland display server. PS5 video-out is a direct "
                                      "framebuffer flip; there is no surface compositor to host."});
-    attempt.blockers.push_back(
-        Blocker{"bionic_runtime",
-                "Bionic ELF loader & auxv stack staging researched and verified (Milestone 4); "
-                "full dynamic linker namespaces remain un-hosted."});
+    attempt.blockers.push_back(Blocker{
+        "bionic_runtime", "ELF inspection, bounded stack staging and cooperative entry experiment "
+                          "only; TLS and unmodified bionic startup are unsupported; "
+                          "full dynamic linker namespaces remain un-hosted."});
 
     attempt.phase_after = RuntimePhase::kBlocked;
     phase_ = RuntimePhase::kBlocked;

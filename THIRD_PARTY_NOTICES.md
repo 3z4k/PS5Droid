@@ -86,3 +86,22 @@ Any future vendored dependency must add an entry here, keep upstream
 copyright notices, and record the commit/version imported. Proprietary
 material (Sony SDKs, console keys, Google Play Services, Widevine,
 proprietary codecs) is never accepted.
+
+## zlib (linked dependency)
+
+APK manifest decompression uses upstream [zlib](https://github.com/madler/zlib),
+under the [zlib license](https://github.com/madler/zlib/blob/v1.3.2/LICENSE).
+Host builds link the system zlib. PS5 builds fetch zlib 1.3.2 from its official
+release tag with a SHA-256 pinned in CMake. No zlib implementation is copied into
+this repository; its source/license remain with the fetched build dependency.
+
+## Authored inspection and execution fixtures
+
+`tests/fixtures/AndroidManifest.xml` and `cooperative_entry.c` are project-authored
+MIT-licensed fixtures. `aapt2-manifest.apk` contains the compiled authored manifest
+produced by Google AAPT2 8.8.2-12006047 using AOSP API 35 resource definitions.
+It contains no framework or proprietary executable code. See
+[fixture reproduction](docs/apk-inspection.md). AAPT2 and `android.jar` are build
+references used to produce the fixture and are not bundled in the repository.
+The binary XML parser was implemented against the publicly documented AOSP
+ResourceTypes.h data format; no AOSP parser implementation is copied.

@@ -2,6 +2,7 @@
 #include "compat/memory_compat.h"
 
 #include <cstring>
+#include <limits>
 
 #include "platform/platform.h"
 
@@ -14,7 +15,7 @@ constexpr size_t kHeapSize = 1024 * 1024; // 1 MiB brk arena
 
 size_t page_align_up_sz(size_t v) {
     size_t ps = platform::page_size();
-    return (v + ps - 1) & ~(ps - 1);
+    return v > SIZE_MAX - (ps - 1) ? 0 : (v + ps - 1) & ~(ps - 1);
 }
 
 } // namespace
@@ -49,14 +50,21 @@ MapResult CompatMemory::mmap(uintptr_t hint, size_t length, int prot, int flags,
     }
     (void)hint; // treated as a suggestion only; the allocator picks pages
 
+    if (prot & ~(linux_abi::kProtRead | linux_abi::kProtWrite))
+        return {nullptr, linux_abi::kEinval,
+                "unsupported protection; executable guest mappings are unavailable"};
+    if (flags != (linux_abi::kMapPrivate | linux_abi::kMapAnonymous))
+        return {nullptr, linux_abi::kEinval, "unsupported mapping flags"};
     size_t aligned = page_align_up_sz(length);
+    if (!aligned)
+        return {nullptr, linux_abi::kEnomem, "mapping length overflow"};
     void* p = platform::map_anonymous(aligned);
     if (p == nullptr) {
         return {nullptr, linux_abi::kEnomem, "host map_anonymous failed"};
     }
 
     uintptr_t addr = reinterpret_cast<uintptr_t>(p);
-    if (prot != (linux_abi::kProtRead | linux_abi::kProtWrite) && prot != linux_abi::kProtRead) {
+    if (prot != (linux_abi::kProtRead | linux_abi::kProtWrite)) {
         // Adjust to the requested protection (exec never granted).
         bool want_r = (prot & linux_abi::kProtRead) != 0;
         bool want_w = (prot & linux_abi::kProtWrite) != 0;
@@ -74,6 +82,9 @@ MapResult CompatMemory::munmap(uintptr_t address, size_t length) {
     if (length == 0) {
         return {nullptr, linux_abi::kEinval, "munmap length is zero"};
     }
+    length = page_align_up_sz(length);
+    if (!length)
+        return {nullptr, linux_abi::kEinval, "unmap length overflow"};
     for (size_t i = 0; i < mappings_.size(); ++i) {
         const Mapping& m = mappings_[i];
         if (address == m.addr && length == m.size) {
@@ -94,11 +105,12 @@ MapResult CompatMemory::mprotect(uintptr_t address, size_t length, int prot) {
     if (length == 0) {
         return {nullptr, linux_abi::kEinval, "mprotect length is zero"};
     }
-    if ((prot & ~(linux_abi::kProtRead | linux_abi::kProtWrite | linux_abi::kProtExec)) != 0) {
+    if ((prot & ~(linux_abi::kProtRead | linux_abi::kProtWrite)) != 0) {
         return {nullptr, linux_abi::kEinval, "unsupported prot bits"};
     }
     for (const Mapping& m : mappings_) {
-        if (address >= m.addr && address + length <= m.addr + m.size) {
+        if (address >= m.addr && address - m.addr <= m.size &&
+            length <= m.size - (address - m.addr)) {
             bool want_r = (prot & linux_abi::kProtRead) != 0;
             bool want_w = (prot & linux_abi::kProtWrite) != 0;
             if (platform::protect_memory(reinterpret_cast<void*>(address), length, want_r,
@@ -148,10 +160,10 @@ BrkResult CompatMemory::brk(uintptr_t request) {
 
 bool CompatMemory::is_mapped(uintptr_t addr, size_t len) const {
     for (const Mapping& m : mappings_) {
-        if (addr >= m.addr && addr + len <= m.addr + m.size)
+        if (addr >= m.addr && addr - m.addr <= m.size && len <= m.size - (addr - m.addr))
             return true;
     }
-    if (addr >= heap_start_ && addr + len <= heap_end_)
+    if (brk_ready_ && addr >= heap_start_ && addr <= heap_end_ && len <= heap_end_ - addr)
         return true;
     return false;
 }

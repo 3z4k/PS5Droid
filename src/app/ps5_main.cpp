@@ -16,7 +16,9 @@
 #include <cstdio>
 #include <cstring>
 
+#include "android/evidence_report.h"
 #include "android/runtime_manager.h"
+#include "compat/elf_runner.h"
 #include "platform/display.h"
 #include "platform/platform.h"
 #include "platform/ps5/sce_decls.h"
@@ -53,10 +55,20 @@ void show_screen(platform::Framebuffer* fb, const char* title, const char* const
                     kTextColor, 2);
 }
 
-void run_launcher(platform::DisplayBackend* display, platform::InputBackend* input) {
+void save_evidence(const android::CapabilityReport& report,
+                   const std::vector<android::Observation>& observations) {
+    auto text = android::evidence_json(report, {}, observations);
+    if (!platform::write_file("/data/ps5droid-evidence.json", text.data(), text.size()))
+        platform::log(platform::LogLevel::kError, "evidence",
+                      "Cannot write /data/ps5droid-evidence.json");
+}
+
+void run_launcher(platform::DisplayBackend* display, platform::InputBackend* input,
+                  const android::CapabilityReport& report,
+                  std::vector<android::Observation>& observations) {
     ui::LauncherModel launcher;
-    android::RuntimeManager manager;
-    android::CapabilityReport report = manager.probe();
+    unsigned flips = 0, connected_polls = 0, button_edges = 0;
+    bool flip_failed = false;
 
     int screen = 0; // 0 = launcher menu, 1 = probe results, 2 = about
     bool running = true;
@@ -106,14 +118,21 @@ void run_launcher(platform::DisplayBackend* display, platform::InputBackend* inp
             show_screen(fb, "ABOUT", kAbout, 4, -1);
         }
 
-        display->present();
+        if (!display->present()) {
+            flip_failed = true;
+            break;
+        }
+        ++flips;
 
-        if (input->poll(&pad)) {
+        if (input->poll(&pad) && pad.connected) {
+            ++connected_polls;
             bool edge_up = pad.up && !prev_up;
             bool edge_down = pad.down && !prev_down;
             bool edge_cross = pad.cross && !prev_cross;
             bool edge_circle = pad.circle && !prev_circle;
             bool edge_options = pad.options && !prev_options;
+            if (edge_up || edge_down || edge_cross || edge_circle || edge_options)
+                ++button_edges;
 
             if (screen == 0) {
                 if (edge_up)
@@ -152,11 +171,28 @@ void run_launcher(platform::DisplayBackend* display, platform::InputBackend* inp
 
         platform::sleep_ns(1000000); // 1 ms; flips are vsync-locked
     }
+    observations.push_back({"video_flips",
+                            flip_failed ? "failed"
+                            : flips     ? "passed"
+                                        : "not_observed",
+                            std::to_string(flips) + " successful flip waits"});
+    observations.push_back({"connected_pad", connected_polls ? "passed" : "not_observed",
+                            std::to_string(connected_polls) + " connected pad polls"});
+    observations.push_back({"button_edges", button_edges ? "passed" : "not_observed",
+                            std::to_string(button_edges) + " navigation/exit edges"});
 }
 
 } // namespace
 
 int main() {
+    android::RuntimeManager manager;
+    auto report = manager.probe("/data");
+    std::vector<android::Observation> observations;
+    std::string rx_detail;
+    bool rx = compat::probe_rx_memory(&rx_detail);
+    observations.push_back({"rx_memory", rx ? "passed" : "failed", rx_detail});
+    observations.push_back({"cleanup", "not_run", "recorded after launcher exit"});
+    save_evidence(report, observations);
     ps5::sceSystemServiceHideSplashScreen();
 
     platform::DisplayBackend* display = platform::create_ps5_display();
@@ -168,26 +204,40 @@ int main() {
         memset(&req, 0, sizeof(req));
         strncpy(req.message, "PS5Droid: video-out init failed", sizeof(req.message) - 1);
         ps5::sceKernelSendNotificationRequest(0, &req, sizeof(req), 0);
+        observations.push_back({"video_init", "failed", "video-out initialization failed"});
+        save_evidence(report, observations);
         delete display;
         delete input;
         return 1;
     }
 
+    observations.push_back({"video_init", "passed", std::to_string(w) + "x" + std::to_string(h)});
+    save_evidence(report, observations);
     if (!input->init()) {
         ps5::SceNotificationRequest req;
         memset(&req, 0, sizeof(req));
         strncpy(req.message, "PS5Droid: pad init failed", sizeof(req.message) - 1);
         ps5::sceKernelSendNotificationRequest(0, &req, sizeof(req), 0);
+        observations.push_back({"pad_init", "failed", "pad initialization failed"});
+        save_evidence(report, observations);
         display->shutdown();
         delete display;
         delete input;
         return 2;
     }
 
-    run_launcher(display, input);
+    observations.push_back(
+        {"pad_init", "passed", "pad handle opened; connection verified separately"});
+    save_evidence(report, observations);
+    run_launcher(display, input, report, observations);
 
+    input->shutdown();
     display->shutdown();
     delete display;
     delete input;
+    observations[1] = {
+        "cleanup", "not_observed",
+        "shutdown completed; resource release needs repeat-launch hardware verification"};
+    save_evidence(report, observations);
     return 0;
 }

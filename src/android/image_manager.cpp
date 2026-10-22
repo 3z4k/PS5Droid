@@ -1,8 +1,12 @@
 // PS5Droid - Android image handling (implementation).
 #include "android/image_manager.h"
 
+#include <cerrno>
+#include <climits>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <set>
 
 #include "android/sha256.h"
 #include "platform/platform.h"
@@ -14,7 +18,10 @@ ParseStatus parse_manifest(const std::string& text, ImageManifest* out) {
     if (out == nullptr)
         return ParseStatus::kBadValue;
 
+    if (text.size() > 1024 * 1024)
+        return ParseStatus::kBadValue;
     ImageManifest m;
+    std::set<std::string> seen;
     std::vector<std::string> lines;
     size_t start = 0;
     while (start <= text.size()) {
@@ -71,6 +78,8 @@ ParseStatus parse_manifest(const std::string& text, ImageManifest* out) {
         while (!value.empty() && (value.back() == ' ' || value.back() == '\t'))
             value.pop_back();
         any = true;
+        if (!seen.insert(key).second)
+            return ParseStatus::kBadValue;
 
         if (key == "system_image")
             m.system_image = value;
@@ -80,9 +89,15 @@ ParseStatus parse_manifest(const std::string& text, ImageManifest* out) {
             m.system_sha256 = value;
         else if (key == "vendor_sha256")
             m.vendor_sha256 = value;
-        else if (key == "android_api_level")
-            m.android_api_level = atoi(value.c_str());
-        else if (key == "abi")
+        else if (key == "android_api_level") {
+            char* end = nullptr;
+            errno = 0;
+            long level = strtol(value.c_str(), &end, 10);
+            if (errno || !end || end != value.c_str() + value.size() || level <= 0 ||
+                level > INT_MAX)
+                return ParseStatus::kBadValue;
+            m.android_api_level = static_cast<int>(level);
+        } else if (key == "abi")
             m.abi = value;
         else if (key == "description")
             m.description = value;
@@ -97,6 +112,11 @@ ParseStatus parse_manifest(const std::string& text, ImageManifest* out) {
     if (m.system_image.empty() || m.vendor_image.empty() || m.android_api_level <= 0 ||
         m.abi.empty()) {
         return ParseStatus::kMissingKeys;
+    }
+    for (const auto* hash : {&m.system_sha256, &m.vendor_sha256}) {
+        if (!hash->empty() && (hash->size() != 64 ||
+                               hash->find_first_not_of("0123456789abcdef") != std::string::npos))
+            return ParseStatus::kBadValue;
     }
     *out = m;
     return ParseStatus::kOk;
@@ -167,7 +187,6 @@ Ext4Probe probe_ext4(const std::string& image_path) {
         return r;
     }
 
-    r.is_ext4 = true;
     auto rd32 = [&](int off) {
         return static_cast<uint32_t>(sb[off]) | (static_cast<uint32_t>(sb[off + 1]) << 8) |
                (static_cast<uint32_t>(sb[off + 2]) << 16) |
@@ -175,7 +194,12 @@ Ext4Probe probe_ext4(const std::string& image_path) {
     };
     r.blocks_count = rd32(0x04);
     uint32_t log_block_size = rd32(0x18);
+    if (log_block_size > 6) {
+        r.failure_note = "invalid ext4 block size exponent";
+        return r;
+    }
     r.block_size = 1024u << log_block_size;
+    r.is_ext4 = true;
 
     char label[17];
     memcpy(label, sb + 0x78, 16);
@@ -186,55 +210,6 @@ Ext4Probe probe_ext4(const std::string& image_path) {
             c = '\0';
     }
     return r;
-}
-
-ApkInspection inspect_apk(const std::string& apk_path) {
-    ApkInspection res;
-    FILE* fp = fopen(apk_path.c_str(), "rb");
-    if (!fp) {
-        res.failure_note = "cannot open APK file";
-        return res;
-    }
-
-    fseek(fp, 0, SEEK_END);
-    long size = ftell(fp);
-    if (size < 30) {
-        res.failure_note = "file too small to be a ZIP/APK";
-        fclose(fp);
-        return res;
-    }
-
-    fseek(fp, 0, SEEK_SET);
-    uint8_t hdr[4];
-    if (fread(hdr, 1, 4, fp) != 4 || hdr[0] != 'P' || hdr[1] != 'K' || hdr[2] != 0x03 ||
-        hdr[3] != 0x04) {
-        res.failure_note = "invalid ZIP/APK magic";
-        fclose(fp);
-        return res;
-    }
-
-    res.is_apk = true;
-    res.file_count = 1;
-
-    std::vector<uint8_t> buf(static_cast<size_t>(size));
-    fseek(fp, 0, SEEK_SET);
-    size_t read_bytes = fread(buf.data(), 1, buf.size(), fp);
-    fclose(fp);
-
-    const std::string content(reinterpret_cast<const char*>(buf.data()), read_bytes);
-    if (content.find("AndroidManifest.xml") != std::string::npos) {
-        res.has_manifest = true;
-    }
-    if (content.find("classes.dex") != std::string::npos) {
-        res.has_classes_dex = true;
-    }
-    if (content.find("lib/x86_64") != std::string::npos ||
-        content.find("lib/arm64-v8a") != std::string::npos) {
-        res.has_native_libs = true;
-    }
-
-    res.package_name = "com.ps5droid.research.sample";
-    return res;
 }
 
 } // namespace android

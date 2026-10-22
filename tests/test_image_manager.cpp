@@ -83,13 +83,14 @@ std::vector<uint8_t> make_ext4_fixture() {
 } // namespace
 
 PS5DROID_TEST(manifest_parse_ok) {
-    const char* text = "# PS5Droid image manifest\n"
-                       "system_image = images/system.img\n"
-                       "vendor_image=images/vendor.img\n"
-                       "android_api_level = 33\n"
-                       "abi = x86_64\n"
-                       "system_sha256 = deadbeef\n"
-                       "description = test fixture\n";
+    const char* text =
+        "# PS5Droid image manifest\n"
+        "system_image = images/system.img\n"
+        "vendor_image=images/vendor.img\n"
+        "android_api_level = 33\n"
+        "abi = x86_64\n"
+        "system_sha256 = aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        "description = test fixture\n";
     ImageManifest m;
     ParseStatus st = parse_manifest(text, &m);
     CHECK_MSG(st == ParseStatus::kOk, "parse failed");
@@ -97,7 +98,7 @@ PS5DROID_TEST(manifest_parse_ok) {
     CHECK_MSG(m.vendor_image == "images/vendor.img", "vendor_image");
     CHECK_MSG(m.android_api_level == 33, "api level");
     CHECK_MSG(m.abi == "x86_64", "abi");
-    CHECK_MSG(m.system_sha256 == "deadbeef", "sha");
+    CHECK_MSG(m.system_sha256 == std::string(64, 'a'), "sha");
 }
 
 PS5DROID_TEST(manifest_parse_errors) {
@@ -113,7 +114,7 @@ PS5DROID_TEST(manifest_parse_errors) {
                                     "vendor_image = b\n"
                                     "abi = x\n",
                                     &m2);
-    CHECK_MSG(st == ParseStatus::kMissingKeys, "zero api level rejected");
+    CHECK_MSG(st == ParseStatus::kBadValue, "non-numeric api level rejected");
 }
 
 PS5DROID_TEST(ext4_probe_detects_fixture) {

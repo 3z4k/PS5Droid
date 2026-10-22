@@ -1,4 +1,5 @@
 // PS5Droid - Milestone 3 & 4 unit tests.
+#include "elf_fixture.h"
 #include "test_framework.h"
 
 #include <cstring>
@@ -12,7 +13,7 @@ using namespace ps5droid::compat;
 PS5DROID_TEST(fd_table_basic_rw_seek) {
     CompatFdTable table;
     std::string path = "test_fd_table.tmp";
-    int fd = table.open_file(path, 0x200 | 0x400 | 0x2, 0644);
+    int fd = table.open_file(path, 0x40 | 0x200 | 0x2, 0644);
     CHECK_MSG(fd >= 3, "open_file failed");
 
     const char* msg = "hello fd_table";
@@ -40,16 +41,8 @@ PS5DROID_TEST(fd_table_basic_rw_seek) {
 }
 
 PS5DROID_TEST(bionic_loader_hdr_and_stack) {
-    // Construct fake ELF64 header
-    uint8_t elf_bytes[128] = {0};
-    elf_bytes[0] = 0x7f;
-    elf_bytes[1] = 'E';
-    elf_bytes[2] = 'L';
-    elf_bytes[3] = 'F';
-    elf_bytes[4] = 2;   // 64-bit
-    elf_bytes[18] = 62; // x86_64
-
-    BionicElfInfo info = BionicLoader::parse_header(elf_bytes, sizeof(elf_bytes));
+    auto elf_bytes = fixture::elf();
+    BionicElfInfo info = BionicLoader::parse_header(elf_bytes.data(), elf_bytes.size());
     CHECK_MSG(info.valid, "ELF header parse failed");
 
     auto stack = BionicLoader::setup_initial_stack(info, {"app"}, {"ENV=1"});

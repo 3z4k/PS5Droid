@@ -1,146 +1,114 @@
 name: ci
-
 on:
   push:
-    branches: ["*"]
+    branches: ["**"]
   pull_request:
   workflow_dispatch:
-
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   lint:
-    name: format & repo hygiene
+    name: Format and documentation hygiene
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install clang-format
-        run: pipx install clang-format==23.1.3
-
-      - name: clang-format check
-        run: |
-          find src tests -name '*.cpp' -o -name '*.h' | sort | \
-            xargs clang-format --dry-run --Werror
-
-      - name: Repository hygiene
-        run: |
-          set -e
-          for f in README.md LICENSE THIRD_PARTY_NOTICES.md CMakeLists.txt \
-                   docs/architecture.md docs/platform-constraints.md \
-                   docs/waydroid-analysis.md docs/development.md \
-                   .clang-format .gitignore; do
-            test -f "$f" || { echo "missing required file: $f"; exit 1; }
-          done
-          ! grep -RInE 'fake (SDK|implementation)|return success; *// *placeholder|TODO: pretend' src tests
-
+      - run: pipx install clang-format==23.1.3
+      - run: git ls-files '*.cpp' '*.h' '*.c' | xargs clang-format --dry-run --Werror
+      - run: python3 tools/check_docs.py
   host:
-    name: host build & tests (${{ matrix.compiler }})
+    name: Host (${{ matrix.compiler }}, ${{ matrix.sanitizer }})
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        compiler: [gcc, clang]
-
+        include:
+          - {compiler: gcc, sanitizer: none}
+          - {compiler: clang, sanitizer: none}
+          - {compiler: clang, sanitizer: "address,undefined"}
+          - {compiler: clang, sanitizer: thread}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake ninja-build g++ clang
-
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build g++ clang lld zlib1g-dev
       - name: Configure
+        shell: bash
         run: |
-          if [ "${{ matrix.compiler }}" = "clang" ]; then
-            cmake -B build -G Ninja \
-              -DCMAKE_CXX_COMPILER=clang++ \
-              -DCMAKE_C_COMPILER=clang
+          if [ '${{ matrix.compiler }}' = clang ]; then
+            export CC=clang CXX=clang++
           else
-            cmake -B build -G Ninja
+            export CC=gcc CXX=g++
           fi
-
-      - name: Build
-        run: cmake --build build 2>&1 | tee build.log
-
-      - name: Unit tests
-        run: ctest --test-dir build --output-on-failure 2>&1 | tee test.log
-
-      - name: Runtime smoke test (host binary is NOT a PS5 executable)
+          cmake -B build -G Ninja -DPS5DROID_SANITIZERS='${{ matrix.sanitizer }}'
+      - name: Build and test
         run: |
-          ./build/ps5droid-host | tee smoke.log
+          cmake --build build 2>&1 | tee build.log
+          ctest --test-dir build --output-on-failure 2>&1 | tee test.log
+      - name: CLI and native ELF smoke tests
+        if: matrix.sanitizer == 'none'
+        run: |
+          python3 tools/build_elf_fixture.py --output build/fixtures/cooperative.elf
+          ./build/ps5droid-host --run-cooperative-elf build/fixtures/cooperative.elf | tee elf.log
           ./build/ps5droid-host --matrix | tee matrix.log
-          ./build/ps5droid-host --start-attempt | tee start.log
-
-      - name: Upload logs
+          ./build/ps5droid-host --start-attempt | tee blockers.log
+          ./build/ps5droid-host --report-json build/host-evidence.json --probe-exec
+          ./build/ps5droid-host --inspect-apk tests/fixtures/aapt2-manifest.apk > build/apk.json
+          python3 tools/check_reports.py build/host-evidence.json build/apk.json
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
-          name: host-${{ matrix.compiler }}-logs
+          name: host-${{ matrix.compiler }}-${{ matrix.sanitizer }}
           path: |
-            build.log
-            test.log
-            smoke.log
-            matrix.log
-            start.log
-
-  ps5:
-    name: PS5 payload cross-build (ELF only)
-    runs-on: ubuntu-24.04
-
+            *.log
+            build/*evidence.json
+            build/apk.json
+  macos:
+    name: macOS portability
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install cross toolchain prerequisites
+      - run: cmake -B build && cmake --build build && ctest --test-dir build --output-on-failure
+  fuzz:
+    name: Bounded parser fuzz smoke
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build zlib1g-dev
+      - run: CC=clang CXX=clang++ cmake -B build -G Ninja -DPS5DROID_BUILD_FUZZER=ON
+      - run: cmake --build build --target ps5droid_fuzz
+      - run: ./build/ps5droid_fuzz -runs=10000 -max_len=65536
+  ps5:
+    name: PS5 cross-build (hardware execution unverified)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y clang-18 lld-18 llvm-18-dev cmake ninja-build curl unzip
+      - name: Install checksum-verified SDK
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang-18 lld-18 llvm-18-dev cmake ninja-build wget unzip
-
-      - name: Install ps5-payload-sdk (open-source release)
+          url=$(python3 -c 'import json; print(json.load(open(".github/ps5-sdk.json"))["url"])')
+          sha=$(python3 -c 'import json; print(json.load(open(".github/ps5-sdk.json"))["sha256"])')
+          curl --fail --location --retry 3 "$url" -o sdk.zip
+          echo "$sha  sdk.zip" | sha256sum --check --strict
+          sudo unzip -q -d /opt sdk.zip
+          echo 'PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk' >> "$GITHUB_ENV"
+      - name: Configure and build
         run: |
-          wget -q https://github.com/ps5-payload-dev/sdk/releases/latest/download/ps5-payload-sdk.zip
-          sudo unzip -d /opt ps5-payload-sdk.zip
-          echo "PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk" >> "$GITHUB_ENV"
-
-      - name: Configure (ps5-payload-sdk toolchain)
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          test -f "$PS5_PAYLOAD_SDK/toolchain/prospero.cmake" || {
-            echo "::error::PS5 toolchain file not found"
-            find "$PS5_PAYLOAD_SDK" -maxdepth 5 -type f \
-              -name '*.cmake' -print
-            exit 1
-          }
-
-          cmake -S . -B build-ps5 -G Ninja \
+          sdk_version=$(python3 -c 'import json; print(json.load(open(".github/ps5-sdk.json"))["version"])')
+          cmake -B build-ps5 -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE="$PS5_PAYLOAD_SDK/toolchain/prospero.cmake" \
-            -DPS5DROID_BUILD_PS5=ON \
-            2>&1 | tee configure-ps5.log
-
-      - name: Build ps5droid.elf
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cmake --build build-ps5 --target ps5droid \
-            2>&1 | tee build-ps5.log
-
-          test -f build-ps5/ps5droid.elf || {
-            echo "::error::Expected PS5 ELF was not produced"
-            find build-ps5 -maxdepth 4 -type f -print
-            exit 1
-          }
-
-      - name: Upload payload
-        if: success()
-        uses: actions/upload-artifact@v4
+            -DPS5DROID_BUILD_PS5=ON -DPS5DROID_SDK_VERSION="$sdk_version" 2>&1 | tee configure-ps5.log
+          cmake --build build-ps5 --target ps5droid 2>&1 | tee build-ps5.log
+          test -s build-ps5/ps5droid.elf
+          sha256sum build-ps5/ps5droid.elf > build-ps5/ps5droid.elf.sha256
+      - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: ps5droid-elf-payload
-          path: build-ps5/ps5droid.elf
-          if-no-files-found: error
-
-      - name: Artifact note
-        run: |
-          echo "ps5droid.elf is a native ELF payload for use with an ELF" \
-               "loader (e.g. ps5-payload-elfldr). It is NOT a PS5 PKG and" \
-               "has not been executed on a console by CI."
+          name: ps5-elf-experimental
+          path: |
+            build-ps5/ps5droid.elf
+            build-ps5/ps5droid.elf.sha256
+            *-ps5.log
+            .github/ps5-sdk.json

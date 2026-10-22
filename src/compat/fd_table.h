@@ -1,8 +1,7 @@
 // PS5Droid - Guest File Descriptor Table and Epoll abstraction.
 //
-// Milestone 3: In-process file descriptor table managing simulated guest fds
-// (files, streams, pipes, eventfds, epoll instances) and multiplexing epoll
-// event loops over kqueue / host poll primitives.
+// Native files, shared descriptor lifetimes and eventfd counters. Epoll currently
+// supports level-triggered eventfd readiness only; other targets/flags fail explicitly.
 #pragma once
 
 #include <cstddef>
@@ -30,19 +29,32 @@ struct StatBuf {
     uint32_t st_mode;
     uint32_t st_uid;
     uint32_t st_gid;
+    uint32_t padding;
     uint64_t st_rdev;
     int64_t st_size;
     int64_t st_blksize;
     int64_t st_blocks;
     int64_t st_atime_sec;
+    uint64_t st_atime_nsec;
     int64_t st_mtime_sec;
+    uint64_t st_mtime_nsec;
     int64_t st_ctime_sec;
+    uint64_t st_ctime_nsec;
+    int64_t reserved[3];
 };
 
+static_assert(sizeof(StatBuf) == 144, "Linux x86_64 stat layout");
+
+#pragma pack(push, 1)
 struct EpollEvent {
     uint32_t events;
     uint64_t data;
 };
+
+#pragma pack(pop)
+static_assert(sizeof(EpollEvent) == 12, "Linux x86_64 epoll_event layout");
+
+struct FdSignal;
 
 class FdEntry {
   public:
@@ -53,6 +65,7 @@ class FdEntry {
     virtual int64_t lseek(int64_t offset, int whence) = 0;
     virtual bool fstat(StatBuf* statbuf) = 0;
     virtual void close() = 0;
+    virtual uint32_t ready() { return 0; }
 };
 
 class CompatFdTable {
@@ -61,7 +74,7 @@ class CompatFdTable {
     ~CompatFdTable();
 
     int open_file(const std::string& path, int flags, int mode);
-    int create_epoll();
+    int create_epoll(int flags = 0);
     int create_eventfd(uint64_t initval, int flags);
 
     bool epoll_ctl(int epfd, int op, int fd, const EpollEvent* event);
@@ -81,7 +94,8 @@ class CompatFdTable {
 
   private:
     std::mutex mutex_;
-    int next_fd_ = 3; // 0=stdin, 1=stdout, 2=stderr
+    int insert(std::shared_ptr<FdEntry> entry);
+    std::shared_ptr<FdSignal> signal_;
     std::unordered_map<int, std::shared_ptr<FdEntry>> table_;
 };
 

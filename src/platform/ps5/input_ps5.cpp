@@ -5,6 +5,7 @@
 // console. See docs/platform-constraints.md.
 #include "platform/display.h"
 #include "platform/ps5/sce_decls.h"
+#include <cstring>
 
 namespace ps5droid {
 namespace platform {
@@ -12,6 +13,7 @@ namespace {
 
 class Ps5Input : public InputBackend {
   public:
+    ~Ps5Input() override { shutdown(); }
     bool init() override {
         if (inited_)
             return true;

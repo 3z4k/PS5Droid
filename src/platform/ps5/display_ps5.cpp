@@ -13,6 +13,7 @@
 // SDL port), but never executed on a console. Treat as experimental until
 // a console run is documented. See docs/platform-constraints.md.
 #include "platform/display.h"
+#include "platform/platform.h"
 #include "platform/ps5/sce_decls.h"
 
 #include <cstring>
@@ -58,6 +59,7 @@ class Ps5Display : public DisplayBackend {
             return false;
         }
 
+        allocated_ = true;
         void* vaddr = nullptr;
         if (ps5::sceKernelMapDirectMemory(&vaddr, kTotalSize, kMapProtReadWrite, 0, phys_addr_,
                                           kDirectAlign) != 0) {
@@ -65,6 +67,7 @@ class Ps5Display : public DisplayBackend {
             return false;
         }
 
+        mapped_ = vaddr;
         buffers_[0].data = vaddr;
         buffers_[1].data = reinterpret_cast<uint8_t*>(vaddr) + kBufferSize;
 
@@ -111,7 +114,9 @@ class Ps5Display : public DisplayBackend {
         }
         struct kevent evt;
         int count = 0;
-        if (ps5::sceKernelWaitEqueue(event_queue_, &evt, 1, &count, 0) != 0) {
+        uint32_t timeout_us = 1000000;
+        if (ps5::sceKernelWaitEqueue(event_queue_, &evt, 1, &count, &timeout_us) != 0 ||
+            count != 1) {
             return false;
         }
         current_ ^= 1;
@@ -132,9 +137,15 @@ class Ps5Display : public DisplayBackend {
             ps5::sceVideoOutClose(handle_);
             handle_ = -1;
         }
-        if (phys_addr_ != 0) {
+        frame_ = Framebuffer::wrap(nullptr, 0, 0);
+        if (mapped_) {
+            platform::unmap(mapped_, kTotalSize);
+            mapped_ = nullptr;
+        }
+        if (allocated_) {
             ps5::sceKernelReleaseDirectMemory(phys_addr_, kTotalSize);
             phys_addr_ = 0;
+            allocated_ = false;
         }
         inited_ = false;
     }
@@ -144,6 +155,8 @@ class Ps5Display : public DisplayBackend {
   private:
     int handle_ = -1;
     intptr_t phys_addr_ = 0;
+    bool allocated_ = false;
+    void* mapped_ = nullptr;
     struct kevent* event_queue_ = nullptr;
     ps5::SceVideoOutBuffer buffers_[2]{};
     ps5::SceVideoOutBufferAttribute attribute_{};
